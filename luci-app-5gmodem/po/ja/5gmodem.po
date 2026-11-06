@@ -3643,6 +3643,9 @@ msgstr "リクエストを送信中"
 msgid "Restoring the previous network mode"
 msgstr "元のネットワークモードに戻しています"
 
+msgid "The network dropped the request, trying again"
+msgstr "ネットワークがリクエストを切断しました。再試行しています"
+
 msgid "Could not switch the modem to 3G, so the request was not sent: USSD needs the circuit-switched channel."
 msgstr "モデムを 3G に切り替えられなかったため、リクエストを送信しませんでした: USSD には回線交換チャネルが必要です。"
 
@@ -3712,8 +3715,8 @@ msgstr "回線が落ちたら予備の回線に通信を切り替える"
 msgid "A link that has an address but no internet will not give the traffic up on its own - the watchdog moves the route past it, and brings it back when the link recovers. Route metrics in the settings stay untouched. On by default."
 msgstr "アドレスはあるのにインターネットにつながらない回線は、自分からは通信を手放しません。監視機能が経路をその回線より後ろに回し、回線が戻ったら元に戻します。設定の経路メトリックは変更しません。既定はオンです。"
 
-msgid "Traffic goes through %s, and there is no internet on it. Automatic switching is off - the watchdog sees the failure and does nothing."
-msgstr "通信は %s を通っていますが、そこではインターネットにつながりません。自動切り替えがオフなので、監視機能は障害を検知しても何もしません。"
+msgid "Traffic goes through %s, and there is no internet on it. Automatic switching to another link is off."
+msgstr "通信は %s を通っていますが、そこではインターネットにつながりません。別の回線への自動切り替えはオフです。"
 
 msgid "Turn switching on"
 msgstr "切り替えをオンにする"
@@ -6130,3 +6133,53 @@ msgstr "SMS 表示モード"
 
 msgid "This mode also activates if configured in 'Inbox'. Button actions below apply only to this mode."
 msgstr "このモードは「受信箱」で設定した場合にも有効になります。下のボタン動作はこのモードでのみ適用されます。"
+msgid "Select configuration"
+msgstr "設定を選択"
+
+msgid "Configuration switch failed"
+msgstr "設定の切り替えに失敗しました"
+
+msgid "Apply and restart"
+msgstr "適用して再起動"
+
+msgid "SSClash configuration"
+msgstr "SSClash の設定"
+
+msgid "Active configuration"
+msgstr "使用中の設定"
+
+msgid "No YAML profiles found in /opt/clash/"
+msgstr "/opt/clash/ に YAML プロファイルが見つかりません"
+
+msgid "SSClash is not installed"
+msgstr "SSClash がインストールされていません"
+
+msgid "Invalid profile"
+msgstr "無効なプロファイル"
+
+msgid "Profile does not exist"
+msgstr "プロファイルが存在しません"
+
+msgid "A profile switch is already running"
+msgstr "プロファイルの切り替えは既に実行中です"
+
+msgid "Clash rejected the profile; current configuration was kept"
+msgstr "Clash がプロファイルを拒否したため、現在の設定を維持しました"
+
+msgid "Service restart failed; previous configuration restored"
+msgstr "サービスの再起動に失敗したため、以前の設定を復元しました"
+
+msgid "Profile applied, but its name could not be saved"
+msgstr "プロファイルを適用しましたが、名前を保存できませんでした"
+
+msgid "Could not back up the current configuration; switching cancelled"
+msgstr "現在の設定をバックアップできないため、切り替えを中止しました"
+
+msgid "The latest config.yaml is saved in config.yaml-backup and can be restored by selecting config.yaml."
+msgstr "最新の config.yaml は config.yaml-backup に保存されます。復元するには config.yaml を選択してください。"
+
+msgid "Service is restarting…"
+msgstr "サービスを再起動しています…"
+
+msgid "Restarting…"
+msgstr "再起動中…"

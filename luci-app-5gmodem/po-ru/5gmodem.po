@@ -3887,6 +3887,9 @@ msgstr "Отправляю запрос"
 msgid "Restoring the previous network mode"
 msgstr "Возвращаю прежний режим сети"
 
+msgid "The network dropped the request, trying again"
+msgstr "Сеть оборвала запрос, пробую ещё раз"
+
 msgid "Could not switch the modem to 3G, so the request was not sent: USSD needs the circuit-switched channel."
 msgstr "Не удалось перевести модем в 3G, запрос не отправлен: USSD ходит по каналу CS."
 
@@ -3956,8 +3959,8 @@ msgstr "Переключать трафик на запасной линк пр�
 msgid "A link that has an address but no internet will not give the traffic up on its own - the watchdog moves the route past it, and brings it back when the link recovers. Route metrics in the settings stay untouched. On by default."
 msgstr "Линк с адресом, но без интернета сам трафик не уступит: маршрут через него уводит сторож и возвращает, когда линк оживает. Метрики в настройках при этом не меняются. По умолчанию включено."
 
-msgid "Traffic goes through %s, and there is no internet on it. Automatic switching is off - the watchdog sees the failure and does nothing."
-msgstr "Трафик идёт через %s, а интернета на нём нет. Переключение выключено - сторож видит провал и ничего не делает."
+msgid "Traffic goes through %s, and there is no internet on it. Automatic switching to another link is off."
+msgstr "Трафик идёт через %s, а интернета на нём нет. Автоматическое переключение на другой канал выключено."
 
 msgid "Turn switching on"
 msgstr "Включить переключение"
@@ -6415,3 +6418,53 @@ msgstr "Режим показа SMS"
 
 msgid "This mode also activates if configured in 'Inbox'. Button actions below apply only to this mode."
 msgstr "Этот режим также включается, если это настроен во «Входящие». Действия кнопок ниже работают только в этом режиме."
+msgid "Select configuration"
+msgstr "Выбрать конфигурацию"
+
+msgid "Configuration switch failed"
+msgstr "Не удалось переключить конфигурацию"
+
+msgid "Apply and restart"
+msgstr "Применить и перезапустить"
+
+msgid "SSClash configuration"
+msgstr "Конфигурация SSClash"
+
+msgid "Active configuration"
+msgstr "Активная конфигурация"
+
+msgid "No YAML profiles found in /opt/clash/"
+msgstr "В /opt/clash/ не найдены профили YAML"
+
+msgid "SSClash is not installed"
+msgstr "SSClash не установлен"
+
+msgid "Invalid profile"
+msgstr "Недопустимый профиль"
+
+msgid "Profile does not exist"
+msgstr "Профиль не существует"
+
+msgid "A profile switch is already running"
+msgstr "Переключение профиля уже выполняется"
+
+msgid "Clash rejected the profile; current configuration was kept"
+msgstr "Clash отклонил профиль; текущая конфигурация сохранена"
+
+msgid "Service restart failed; previous configuration restored"
+msgstr "Не удалось перезапустить службу; предыдущая конфигурация восстановлена"
+
+msgid "Profile applied, but its name could not be saved"
+msgstr "Профиль применён, но не удалось сохранить его имя"
+
+msgid "Could not back up the current configuration; switching cancelled"
+msgstr "Не удалось создать резервную копию текущей конфигурации; переключение отменено"
+
+msgid "The latest config.yaml is saved in config.yaml-backup and can be restored by selecting config.yaml."
+msgstr "Последняя версия config.yaml сохраняется в config.yaml-backup. Для её восстановления выберите config.yaml."
+
+msgid "Service is restarting…"
+msgstr "Служба перезапускается…"
+
+msgid "Restarting…"
+msgstr "Перезапуск…"

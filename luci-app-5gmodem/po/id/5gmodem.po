@@ -3643,6 +3643,9 @@ msgstr "Mengirim permintaan"
 msgid "Restoring the previous network mode"
 msgstr "Memulihkan mode jaringan sebelumnya"
 
+msgid "The network dropped the request, trying again"
+msgstr "Jaringan memutus permintaan, mencoba lagi"
+
 msgid "Could not switch the modem to 3G, so the request was not sent: USSD needs the circuit-switched channel."
 msgstr "Tidak dapat mengalihkan modem ke 3G, sehingga permintaan tidak dikirim: USSD memerlukan kanal circuit-switched."
 
@@ -3712,8 +3715,8 @@ msgstr "Alihkan lalu lintas ke tautan cadangan saat salah satunya mati"
 msgid "A link that has an address but no internet will not give the traffic up on its own - the watchdog moves the route past it, and brings it back when the link recovers. Route metrics in the settings stay untouched. On by default."
 msgstr "Tautan yang punya alamat tetapi tanpa internet tidak akan melepaskan lalu lintas dengan sendirinya - pengawas koneksi memindahkan rute melewatinya, dan mengembalikannya saat tautan pulih. Metrik rute di pengaturan tidak diubah. Aktif secara bawaan."
 
-msgid "Traffic goes through %s, and there is no internet on it. Automatic switching is off - the watchdog sees the failure and does nothing."
-msgstr "Lalu lintas melewati %s, dan tidak ada internet di sana. Pengalihan otomatis nonaktif - pengawas koneksi melihat kegagalan tetapi tidak berbuat apa-apa."
+msgid "Traffic goes through %s, and there is no internet on it. Automatic switching to another link is off."
+msgstr "Lalu lintas melewati %s, dan tidak ada internet di sana. Pengalihan otomatis ke koneksi lain nonaktif."
 
 msgid "Turn switching on"
 msgstr "Aktifkan pengalihan"
@@ -6130,3 +6133,53 @@ msgstr "Mode tampilan SMS"
 
 msgid "This mode also activates if configured in 'Inbox'. Button actions below apply only to this mode."
 msgstr "Mode ini juga aktif jika dikonfigurasi di \"Kotak masuk\". Aksi tombol di bawah hanya berlaku untuk mode ini."
+msgid "Select configuration"
+msgstr "Pilih konfigurasi"
+
+msgid "Configuration switch failed"
+msgstr "Gagal mengganti konfigurasi"
+
+msgid "Apply and restart"
+msgstr "Terapkan dan mulai ulang"
+
+msgid "SSClash configuration"
+msgstr "Konfigurasi SSClash"
+
+msgid "Active configuration"
+msgstr "Konfigurasi aktif"
+
+msgid "No YAML profiles found in /opt/clash/"
+msgstr "Tidak ada profil YAML di /opt/clash/"
+
+msgid "SSClash is not installed"
+msgstr "SSClash belum terpasang"
+
+msgid "Invalid profile"
+msgstr "Profil tidak valid"
+
+msgid "Profile does not exist"
+msgstr "Profil tidak ada"
+
+msgid "A profile switch is already running"
+msgstr "Pergantian profil sedang berlangsung"
+
+msgid "Clash rejected the profile; current configuration was kept"
+msgstr "Clash menolak profil; konfigurasi saat ini dipertahankan"
+
+msgid "Service restart failed; previous configuration restored"
+msgstr "Gagal memulai ulang layanan; konfigurasi sebelumnya dipulihkan"
+
+msgid "Profile applied, but its name could not be saved"
+msgstr "Profil diterapkan, tetapi namanya tidak dapat disimpan"
+
+msgid "Could not back up the current configuration; switching cancelled"
+msgstr "Tidak dapat mencadangkan konfigurasi saat ini; pergantian dibatalkan"
+
+msgid "The latest config.yaml is saved in config.yaml-backup and can be restored by selecting config.yaml."
+msgstr "Versi terakhir config.yaml disimpan dalam config.yaml-backup. Pilih config.yaml untuk memulihkannya."
+
+msgid "Service is restarting…"
+msgstr "Layanan sedang dimulai ulang…"
+
+msgid "Restarting…"
+msgstr "Memulai ulang…"
