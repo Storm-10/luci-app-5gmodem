@@ -195,6 +195,25 @@ function addReceiveIncoming(s) {
 	o.default = 'Start';
 	o.rmempty = false;
 
+	if (MCU) {
+		o = s.option(form.Flag, 'mcu_sms', _('Output new message(s) to GL-E750 display'),
+			_("Display is limited to Latin alphabet only. Translit will be used for Cyrillic symbols. E.g. Bud'te schastlivy!"));
+		o.default = '0';
+		o.rmempty = false;
+
+		o = s.option(form.Flag, 'mcu_last', _('Show only the last message'),
+			_('When off all unread SMS will be displayed cycling in the order of time received starting with the most recent.'));
+		o.default = '1';
+		o.rmempty = false;
+		o.depends('mcu_sms', '1');
+
+		o = s.option(form.Value, 'mcu_time', _('Time to display messages, seconds'),
+			_("Timer restarts on input. Configure actions in 'Buttons'."));
+		o.default = '10';
+		o.datatype = 'range(1,900)';
+		o.depends('mcu_sms', '1');
+	}
+
 	o = s.option(form.Value, 'bnumber', _('Phone number to be blurred'),
 		_('The last 5 digits of this number will be blurred'));
 	o.password = true;
@@ -296,7 +315,7 @@ function addNotifications(s) {
 						}).then(function() {
 							if (dsled == 'D') {
 								let led = uci.get('5gmodem', 'sms', 'smsled');
-								if (led)
+								if (led && led != 'mcu')
 									return fs.write('/sys/class/leds/' + led + '/brightness', '0');
 							}
 						});
@@ -341,11 +360,15 @@ function addNotifications(s) {
 
 	o = s.option(form.ListValue, 'smsled', _('<abbr title="Light Emitting Diode">LED</abbr> name'),
 		_('Select the notification LED'));
+	if (MCU) {
+		o.value('mcu', _('Flash GL-E750 display'));
+		o.default = 'mcu';
+	}
 	o.load = function(section_id) {
 		return L.resolveDefault(fs.list('/sys/class/leds'), []).then(L.bind(function(leds) {
 			if (leds.length > 0) {
 				leds.sort((a, b) => a.name < b.name ? -1 : (a.name > b.name ? 1 : 0));
-				leds.forEach(e => { if ((o.keylist || []).indexOf(e.name) < 0) { o.value(e.name); } });
+				leds.forEach(e => { if ((this.keylist || []).indexOf(e.name) < 0) { this.value(e.name); } });
 			}
 			return this.super('load', [section_id]);
 		}, this));
@@ -812,7 +835,9 @@ function addSmsCommands(s) {
 	cs.addremove = true;
 	cs.addbtntitle = '+';
 	cs.nodescriptions = true;
-	cs.description = _('Send the word from the first column in an SMS - the router runs what is in the second. The word is matched without case, anything after it reaches the command as SMS_ARGS. A command that kills the connection (reboot, modem power cycle) needs a delay: the reply is then sent BEFORE the command runs, which is the only way it can be sent at all.');
+	cs.description = _('Send the word from the first column in an SMS - the router runs what is in the second. The word is matched without case, anything after it reaches the command as SMS_ARGS. A command that kills the connection (reboot, modem power cycle) needs a delay: the reply is then sent BEFORE the command runs, which is the only way it can be sent at all.')
+		+ ' ' + _("'CMD_OUTPUT &lt;number&gt;' in 'Reply text' will send command output truncated to specified number of characters (single SMS if omitted) and split between multiple messages if needed.")
+		+ ' ' + _('Maximum: 670 characters (10 SMS).');
 
 	o = cs.option(form.Value, 'keyword', _('Word in the SMS'));
 	o.placeholder = 'reboot';
@@ -839,6 +864,8 @@ var GROUPS = {
 	send:    addSendOptions,
 	ussd:    addUssdOptions
 };
+
+var MCU = false;	/* GL-E750/v2 display (mcu-switch) */
 
 var styleInjected = false;
 function injectStyle() {
@@ -879,6 +906,8 @@ return baseclass.extend({
 
 		injectStyle();
 
+		return L.resolveDefault(fs.stat('/usr/bin/mcu-switch'), null).then(function(st) {
+		MCU = !!st;
 		var m = new form.Map('5gmodem');
 		var s = m.section(form.NamedSection, 'sms', 'sms', '', null);
 		s.addremove = false;
@@ -899,6 +928,7 @@ return baseclass.extend({
 				try { localStorage.setItem(storeKey, det.open ? '1' : '0'); } catch (e) {}
 			});
 			return det;
+		});
 		});
 	}
 });
