@@ -3643,6 +3643,9 @@ msgstr "正在发送请求"
 msgid "Restoring the previous network mode"
 msgstr "正在恢复之前的网络模式"
 
+msgid "The network dropped the request, trying again"
+msgstr "网络中断了请求，正在重试"
+
 msgid "Could not switch the modem to 3G, so the request was not sent: USSD needs the circuit-switched channel."
 msgstr "无法将调制解调器切换到 3G，因此请求未发送：USSD 需要电路交换信道。"
 
@@ -3712,8 +3715,8 @@ msgstr "链路断开时将流量切换到备用链路"
 msgid "A link that has an address but no internet will not give the traffic up on its own - the watchdog moves the route past it, and brings it back when the link recovers. Route metrics in the settings stay untouched. On by default."
 msgstr "有地址但无互联网的链路不会自行让出流量——看门狗会将路由绕过它，并在链路恢复后切回。设置中的路由跃点数保持不变。默认开启。"
 
-msgid "Traffic goes through %s, and there is no internet on it. Automatic switching is off - the watchdog sees the failure and does nothing."
-msgstr "流量正经过 %s，而该链路无互联网。自动切换已关闭——看门狗检测到故障但不会采取行动。"
+msgid "Traffic goes through %s, and there is no internet on it. Automatic switching to another link is off."
+msgstr "流量正经过 %s，而该链路无互联网。自动切换到其他链路已关闭。"
 
 msgid "Turn switching on"
 msgstr "开启切换"
@@ -6130,3 +6133,53 @@ msgstr "短信显示模式"
 
 msgid "This mode also activates if configured in 'Inbox'. Button actions below apply only to this mode."
 msgstr "如果在“收件箱”中进行了配置，此模式也会启用。下方的按键操作仅适用于此模式。"
+msgid "Select configuration"
+msgstr "选择配置"
+
+msgid "Configuration switch failed"
+msgstr "配置切换失败"
+
+msgid "Apply and restart"
+msgstr "应用并重启"
+
+msgid "SSClash configuration"
+msgstr "SSClash 配置"
+
+msgid "Active configuration"
+msgstr "当前配置"
+
+msgid "No YAML profiles found in /opt/clash/"
+msgstr "在 /opt/clash/ 中未找到 YAML 配置文件"
+
+msgid "SSClash is not installed"
+msgstr "未安装 SSClash"
+
+msgid "Invalid profile"
+msgstr "无效的配置文件"
+
+msgid "Profile does not exist"
+msgstr "配置文件不存在"
+
+msgid "A profile switch is already running"
+msgstr "正在切换配置"
+
+msgid "Clash rejected the profile; current configuration was kept"
+msgstr "Clash 拒绝了该配置；已保留当前配置"
+
+msgid "Service restart failed; previous configuration restored"
+msgstr "服务重启失败；已恢复先前配置"
+
+msgid "Profile applied, but its name could not be saved"
+msgstr "配置已应用，但无法保存其名称"
+
+msgid "Could not back up the current configuration; switching cancelled"
+msgstr "无法备份当前配置；已取消切换"
+
+msgid "The latest config.yaml is saved in config.yaml-backup and can be restored by selecting config.yaml."
+msgstr "最新的 config.yaml 保存在 config.yaml-backup 中，选择 config.yaml 即可恢复。"
+
+msgid "Service is restarting…"
+msgstr "服务正在重启…"
+
+msgid "Restarting…"
+msgstr "正在重启…"

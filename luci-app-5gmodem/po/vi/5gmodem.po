@@ -3643,6 +3643,9 @@ msgstr "Đang gửi yêu cầu"
 msgid "Restoring the previous network mode"
 msgstr "Đang khôi phục chế độ mạng trước đó"
 
+msgid "The network dropped the request, trying again"
+msgstr "Mạng đã ngắt yêu cầu, đang thử lại"
+
 msgid "Could not switch the modem to 3G, so the request was not sent: USSD needs the circuit-switched channel."
 msgstr "Không thể chuyển modem sang 3G nên yêu cầu chưa được gửi: USSD cần kênh chuyển mạch kênh."
 
@@ -3712,8 +3715,8 @@ msgstr "Chuyển lưu lượng sang kết nối dự phòng khi một kết nố
 msgid "A link that has an address but no internet will not give the traffic up on its own - the watchdog moves the route past it, and brings it back when the link recovers. Route metrics in the settings stay untouched. On by default."
 msgstr "Kết nối có địa chỉ nhưng không có internet sẽ không tự nhường lưu lượng - bộ giám sát sẽ chuyển tuyến qua kết nối khác, và trả lại khi kết nối phục hồi. Metric tuyến trong cài đặt không bị thay đổi. Bật theo mặc định."
 
-msgid "Traffic goes through %s, and there is no internet on it. Automatic switching is off - the watchdog sees the failure and does nothing."
-msgstr "Lưu lượng đi qua %s, và trên đó không có internet. Tự động chuyển đổi đang tắt - bộ giám sát thấy lỗi nhưng không làm gì."
+msgid "Traffic goes through %s, and there is no internet on it. Automatic switching to another link is off."
+msgstr "Lưu lượng đi qua %s, và trên đó không có internet. Tự động chuyển sang kết nối khác đang tắt."
 
 msgid "Turn switching on"
 msgstr "Bật chuyển đổi"
@@ -6130,3 +6133,53 @@ msgstr "Chế độ hiển thị SMS"
 
 msgid "This mode also activates if configured in 'Inbox'. Button actions below apply only to this mode."
 msgstr "Chế độ này cũng được kích hoạt nếu được cấu hình trong \"Hộp thư đến\". Thao tác nút bên dưới chỉ áp dụng cho chế độ này."
+msgid "Select configuration"
+msgstr "Chọn cấu hình"
+
+msgid "Configuration switch failed"
+msgstr "Không thể chuyển cấu hình"
+
+msgid "Apply and restart"
+msgstr "Áp dụng và khởi động lại"
+
+msgid "SSClash configuration"
+msgstr "Cấu hình SSClash"
+
+msgid "Active configuration"
+msgstr "Cấu hình đang dùng"
+
+msgid "No YAML profiles found in /opt/clash/"
+msgstr "Không tìm thấy hồ sơ YAML trong /opt/clash/"
+
+msgid "SSClash is not installed"
+msgstr "SSClash chưa được cài đặt"
+
+msgid "Invalid profile"
+msgstr "Hồ sơ không hợp lệ"
+
+msgid "Profile does not exist"
+msgstr "Hồ sơ không tồn tại"
+
+msgid "A profile switch is already running"
+msgstr "Đang thực hiện chuyển hồ sơ"
+
+msgid "Clash rejected the profile; current configuration was kept"
+msgstr "Clash từ chối hồ sơ; cấu hình hiện tại được giữ nguyên"
+
+msgid "Service restart failed; previous configuration restored"
+msgstr "Không thể khởi động lại dịch vụ; đã khôi phục cấu hình trước đó"
+
+msgid "Profile applied, but its name could not be saved"
+msgstr "Đã áp dụng hồ sơ nhưng không thể lưu tên"
+
+msgid "Could not back up the current configuration; switching cancelled"
+msgstr "Không thể sao lưu cấu hình hiện tại; đã hủy chuyển đổi"
+
+msgid "The latest config.yaml is saved in config.yaml-backup and can be restored by selecting config.yaml."
+msgstr "Phiên bản config.yaml mới nhất được lưu trong config.yaml-backup. Chọn config.yaml để khôi phục."
+
+msgid "Service is restarting…"
+msgstr "Đang khởi động lại dịch vụ…"
+
+msgid "Restarting…"
+msgstr "Đang khởi động lại…"

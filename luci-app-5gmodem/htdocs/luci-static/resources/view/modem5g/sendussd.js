@@ -362,6 +362,7 @@ return view.extend({
 			starting: _('Preparing the request…'),
 			switching: _('Switching the modem to 3G - USSD needs the circuit-switched channel'),
 			sending:   _('Sending the request'),
+			retrying:  _('The network dropped the request, trying again'),
 			restoring: _('Restoring the previous network mode')
 		};
 
@@ -434,7 +435,7 @@ return view.extend({
 			done();
 			stopStage();
 			if (st.status === 'done') {
-				var dec = function(b) { try { return b ? atob(b) : ''; } catch (e) { return ''; } };
+				var dec = function(b) { var r; try { r = b ? atob(b) : ''; } catch (e) { return ''; } try { return decodeURIComponent(escape(r)); } catch (e) { return r; } };
 				var body = dec(st.out);
 				if (!body.trim()) {
 					if (st.unsupported) {
@@ -522,7 +523,7 @@ return view.extend({
 		var buttons = document.querySelectorAll('.cbi-button');
 		for (var i = 0; i < buttons.length; i++)
 			buttons[i].setAttribute('disabled', 'true');
-		var dec = function(b) { try { return b ? atob(b) : ''; } catch (e) { return ''; } };
+		var dec = function(b) { var r; try { r = b ? atob(b) : ''; } catch (e) { return ''; } try { return decodeURIComponent(escape(r)); } catch (e) { return r; } };
 		return fs.exec('/usr/share/5gmodem/ussd.sh', [ 'mm', modemNum, mode, code ]).then(function(r) {
 			var j = {};
 			try { j = JSON.parse((r && r.stdout) || '{}'); } catch (e) {}
@@ -709,7 +710,7 @@ return view.extend({
 
 	load: function() {
 		var self = this, args = arguments;
-		return fresh.check(30911, [ editors, smssettings, modemtabs, mutil ]).then(function() { return self._load5g.apply(self, args); });
+		return fresh.check(30923, [ editors, smssettings, modemtabs, mutil ]).then(function() { return self._load5g.apply(self, args); });
 	},
 
 	_load5g: function() {
