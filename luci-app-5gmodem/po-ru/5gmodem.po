@@ -6315,7 +6315,7 @@ msgid "The network closed the USSD session without a text reply. Some operators 
 msgstr "Сеть закрыла USSD-сессию без текстового ответа. Некоторые операторы присылают ответ в SMS: проверьте входящие."
 
 msgid "Output new message(s) to GL-E750 display"
-msgstr "Выводить новые сообщения на дисплей GL-E750"
+msgstr "Вывод новых SMS на дисплей GL-E750"
 
 msgid "Display is limited to Latin alphabet only. Translit will be used for Cyrillic symbols. E.g. Bud'te schastlivy!"
 msgstr "Дисплей поддерживает только латиницу. Кириллица выводится транслитом, например: Bud'te schastlivy!"
