@@ -36,3 +36,22 @@ Failures retain a specific startup phase and remain retryable. A captured ff/02/
 Offline regression coverage includes enabling before netdev lookup, a rejected first attempt, autodial readback, disabled-context preparation, CID-specific activation, busy/timeout AT locking, DHCP child selection and creation failure, bounded missing-netdev behavior, roaming refusal and the pending-hotplug guard. These checks do not replace a cold-boot/lease/traffic test on the user's modem.
 
 Validation: 52 Python issue regression tests passed; all 16 MT5700 metric/band profile smoke scenarios passed. BusyBox ash syntax checks passed for the modified shell entry points and helper; git diff whitespace checks passed. No hardware connection or traffic test was available.
+
+
+## Reporter feedback on 3.9.30: AT transport before autodial
+
+[Reply](https://github.com/fildunsky/luci-app-5gmodem/issues/68#issuecomment-6719730368) and attachment `5gmodem-diag-20261108-1717.txt`, collected 2026-11-08 at 09:16 UTC. Reviewed the complete attachment after downloading through its GitHub HEAD redirect; direct GET attempts initially returned 504. No subscriber identifiers are reproduced here.
+
+Confirmed evidence:
+
+- OpenWrt 25.12.6, app 3.9.30, MT5700M-CN firmware V200R001C20B022. The reporter says they never wrote cdc_ncm/new_id manually.
+- Configuration 2 is active. Current descriptors are standard CDC NCM: interface 2.0 is 02/0d/00 and 2.1 is 0a/00/01, both bound to cdc_ncm. eth4 exists but is administratively down. This capture does not require overriding the existing driver with huawei_cdc_ncm.
+- PCUI is interface 2.3 (ff/06/12), now ttyUSB1. Interface 2.5 (ff/06/14) is GPS, now ttyUSB3. The manually requested commands were sent to ttyUSB3, so those five empty replies are not evidence that PCUI is dead. Port numbers from a previous USB enumeration must not be reused as stable identities.
+- The collector successfully reads ATI, CPIN READY, CFUN 1, CEREG 2,1, C5GREG 2,1 and CGATT 1 from ttyUSB1. The modem is registered and attached. The same snapshot still reports SETAUTODIAL 0 and no NDIS status payload. CID 1 currently has IPV4V6 with an empty APN.
+- The netifd handler repeatedly logs waiting for registration and never reaches USB autodial. Consecutive query groups finish within a second, then use the configured backoff. Netdev availability and modem registration therefore no longer explain the handler's stop by themselves.
+
+A local transport defect remains in `_td_at`: it invokes external `timeout 8 sms_tool ...` with stderr discarded. Missing timeout returns 127 before sms_tool starts, then the caller treats empty output as an unregistered modem. The package does not require coreutils-timeout. OpenWrt's [BusyBox coreutils configuration](https://github.com/openwrt/openwrt/blob/openwrt-25.12/package/utils/busybox/config/coreutils/Config.in) makes TIMEOUT optional; it has no enabled default in [Config-defaults.in](https://github.com/openwrt/openwrt/blob/openwrt-25.12/package/utils/busybox/Config-defaults.in). This defect is reproducible locally and consistent with the report, but the report does not contain `command -v timeout` or the suppressed exit status, so absence of timeout on this particular router is a strong hypothesis rather than a directly captured fact.
+
+The local correction uses the common `lib.sh` / `at_query` transport instead. It retains an eight-second command watchdog and five-second lock wait, refuses to send when locked, and rejects empty output; it needs no external timeout utility. Missing/unparseable registration now has its own retryable TDTECH_REGISTRATION_UNAVAILABLE phase and identifies the actual selected PCUI path in the log. Explicit non-registration still follows the existing registration/COPS handling. No working CDC NCM driver is unbound, and no USB mode is changed as part of this correction.
+
+Validation: all 60 Python issue regression tests pass, including the real common AT transport with a nonfunctional timeout command, busy-lock refusal, bounded termination of a silent child, lock release and temporary-file cleanup, parsing both registered replies from this report, and a distinct unavailable-registration failure without dialing. Shell syntax and whitespace checks pass. Hardware address acquisition and traffic remain unverified; these local changes are not included in tagged v3.9.30.
