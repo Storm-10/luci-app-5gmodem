@@ -12,13 +12,13 @@ Lấy liên kết `.apk` (OpenWrt 25.12.x) hoặc `.ipk` (24.10.x) từ trang [R
 ### .apk (OpenWrt 25.12.x)
 ```sh
 apk update && apk add curl
-curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.24/luci-app-5gmodem-3.9.24-r1.apk > /tmp/luci-app-5gmodem.apk
+curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.29/luci-app-5gmodem-3.9.29-r1.apk > /tmp/luci-app-5gmodem.apk
 apk add /tmp/luci-app-5gmodem.apk --allow-untrusted
 ```
 
 **Giao diện tiếng Việt**: cài gói tiếng Việt của ứng dụng này và gói tiếng Việt của chính LuCI:
 ```sh
-curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.24/luci-i18n-5gmodem-vi.apk > /tmp/luci-i18n-5gmodem-vi.apk
+curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.29/luci-i18n-5gmodem-vi.apk > /tmp/luci-i18n-5gmodem-vi.apk
 apk add /tmp/luci-i18n-5gmodem-vi.apk --allow-untrusted
 apk add luci-i18n-base-vi
 ```
@@ -38,13 +38,13 @@ trang phát hành.
 ### .ipk (OpenWrt 24.10.x)
 ```sh
 opkg update && opkg install curl
-curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.24/luci-app-5gmodem_3.9.24-r1_all.ipk > /tmp/luci-app-5gmodem.ipk
+curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.29/luci-app-5gmodem_3.9.29-r1_all.ipk > /tmp/luci-app-5gmodem.ipk
 opkg install /tmp/luci-app-5gmodem.ipk
 ```
 
 **Giao diện tiếng Việt**:
 ```sh
-curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.24/luci-i18n-5gmodem-vi.ipk > /tmp/luci-i18n-5gmodem-vi.ipk
+curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.29/luci-i18n-5gmodem-vi.ipk > /tmp/luci-i18n-5gmodem-vi.ipk
 opkg install /tmp/luci-i18n-5gmodem-vi.ipk
 opkg install luci-i18n-base-vi
 ```
@@ -111,7 +111,6 @@ Tôi đã bổ sung tính năng mới cho các modem này (so với 3ginfo và m
 - Tenda MF6 (Mi-Fi dùng ZTE ZX297520V3, USB 19d2:1557) — tín hiệu, pin, SMS và khởi động lại qua web API; băng tần và chế độ mạng qua AT ở debug mode
 - Các USB Android giá rẻ Qualcomm MDM9600 / MDM9610 (PIXLINK, ALEKA UV310 và các loại tương tự), kể cả chế độ "chỉ modem" (QMI) của chúng
 - UFI003 (USB Android Qualcomm MSM8916, USB 05c6:90b4) — tín hiệu qua AT, nhiệt độ và SINR qua ADB, chế độ mạng; cùng thiết bị đó chạy OpenWrt thì modem tích hợp được điều khiển qua ModemManager (băng tần, chế độ mạng, SMS, chọn mạng thủ công)
-- Bộ phát Mi-Fi Android dùng MediaTek MT6735 (USB 0e8d:2004) — lưu lượng, thời gian kết nối, pin và chế độ mạng qua web API, sáu cảm biến nhiệt độ qua ADB; với gói tùy chọn `5gmodem-mtk-at` có thêm RSRQ, SINR, RSSI, thông tin trạm và chuyển băng tần LTE
 - Nhiều modem khác chưa được kiểm tra, nhưng sẽ hỗ trợ mọi modem mà các bản fork gốc hỗ trợ.
 
 ### Đã sửa theo báo cáo của người dùng
@@ -222,17 +221,6 @@ apk add /tmp/lpac.apk --allow-untrusted
 Phương thức truyền được chọn tự động theo giao thức của giao diện, nên thông thường bạn không cần đặt thủ công. Trên đường MBIM, eUICC truy cập được bất kể khe SIM nào đang hoạt động, nên SIM vật lý vẫn trực tuyến trong khi bạn làm việc với eSIM.
 
 `lpac` là phụ thuộc **tùy chọn** — thẻ eSIM chỉ xuất hiện khi nó đã được cài và có eUICC; phần còn lại của ứng dụng hoạt động không cần nó.
-
-## Bộ phát di động MediaTek: 5gmodem-mtk-at
-
-Các bộ phát di động Android dùng MediaTek MT6735 (TianJie CPE903/905/906, KuWfi CPF9xx và tương tự) không cung cấp RSRQ, SINR, thông tin trạm và điều khiển băng tần trong giao diện web. Ứng dụng lấy chúng qua ADB và socket `rild-atci`, cần gói tùy chọn nhỏ `5gmodem-mtk-at`. Trình khách bên trong chạy trên bộ phát chứ không phải trên router, nên một gói `noarch` dùng được cho mọi nền tảng. Không có gói, thiết bị chỉ hiển thị RSRP, pin, nhiệt độ và chế độ mạng.
-
-```sh
-curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/latest/download/5gmodem-mtk-at.apk > /tmp/mtk-at.apk
-apk add /tmp/mtk-at.apk --allow-untrusted
-```
-
-24.10.x: `5gmodem-mtk-at.ipk` + `opkg install`.
 
 ## Dựng từ mã nguồn
 
