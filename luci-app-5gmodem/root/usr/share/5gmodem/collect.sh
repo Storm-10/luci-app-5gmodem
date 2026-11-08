@@ -1772,6 +1772,27 @@ report() {
 	at "$P" "AT+CEREG?"
 	at "$P" "AT+C5GREG?"
 	at "$P" "AT+CGATT?"
+	_td_path=$(tty_usbpath "$P" 2>/dev/null)
+	case "$(cat "/sys/bus/usb/devices/$_td_path/idVendor" 2>/dev/null):$(cat "/sys/bus/usb/devices/$_td_path/idProduct" 2>/dev/null)" in
+		0e8d:7126|0e8d:7127) at "$P" 'AT+ETHERMAL?'; at "$P" 'AT+GTSENRDTEMP=1' ;;
+	esac
+	if [ -n "$_td_path" ] && [ "$(cat "/sys/bus/usb/devices/$_td_path/idVendor" 2>/dev/null):$(cat "/sys/bus/usb/devices/$_td_path/idProduct" 2>/dev/null)" = 3466:3301 ]; then
+		printf '\nTD Tech USB descriptors (%s)\n' "$_td_path"
+		for _td_node in /sys/bus/usb/devices/"$_td_path" /sys/bus/usb/devices/"$_td_path":*; do
+			[ -d "$_td_node" ] || continue
+			printf '%s driver=%s' "${_td_node##*/}" "$(readlink "$_td_node/driver" 2>/dev/null)"
+			for _td_attr in bConfigurationValue bInterfaceClass bInterfaceSubClass bInterfaceProtocol; do
+				[ -r "$_td_node/$_td_attr" ] && printf ' %s=%s' "$_td_attr" "$(cat "$_td_node/$_td_attr")"
+			done
+			printf '\n'
+		done
+		for _td_cmd in 'AT^SETMODE?' 'AT^SETAUTODIAL?' 'AT^NDISSTATQRY?' \
+		               'AT^SYSCFGEX?' 'AT^LTEFREQLOCK?' 'AT^NRFREQLOCK?' \
+		               'AT^HCSQ?' 'AT^MONSC' 'AT^HFREQINFO?' 'AT^MONSSC' \
+		               'AT^CASCELLINFO?' 'AT^MONNC' 'AT+CPMS?'; do
+			at "$P" "$_td_cmd"
+		done
+	fi
 	radio_verdict "$P"
 	mm_fail_verdict "$P"
 	fcclock_verdict "$P"

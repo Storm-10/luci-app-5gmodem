@@ -40,10 +40,80 @@ _has_adb_iface() {
 }
 
 _rescue_data() {
+	[ "$1:$2" = 3466:3301 ] && _td_rescue_data
 	_rd_n=$(data_iface_for "$1" "$2")
 	[ -n "$_rd_n" ] && _rescue_rmnet "$1" "$2" "$_rd_n"
 	_has_adb_iface "$1" "$2" && _release_adb "$1" "$2"
 	return 0
+}
+
+_td_rescue_data() {
+	_td_drop_serial_id
+	for _td_d in /sys/bus/usb/devices/*; do
+		[ "$(cat "$_td_d/idVendor" 2>/dev/null):$(cat "$_td_d/idProduct" 2>/dev/null)" = 3466:3301 ] || continue
+		[ "$(cat "$_td_d/bConfigurationValue" 2>/dev/null)" = 2 ] || continue
+		for _td_i in "$_td_d":2.0 "$_td_d":2.1; do
+			[ -f "$_td_i/bInterfaceClass" ] || continue
+			case "$(basename "$(readlink -f "$_td_i/driver" 2>/dev/null)" 2>/dev/null)" in
+				option|option1|usb_serial_generic|usbserial_generic|generic)
+					echo "${_td_i##*/}" > "$_td_i/driver/unbind" 2>/dev/null
+					[ "$(cat "$_td_i/bInterfaceClass" 2>/dev/null)" = ff ] \
+						|| echo "${_td_i##*/}" > /sys/bus/usb/drivers_probe 2>/dev/null
+					logger -t 5gmodem-usbports "TD Tech: released network interface ${_td_i##*/} from serial binding"
+					;;
+			esac
+		done
+		_td_bind_ncm "$_td_d:2.0"
+	done
+}
+
+_td_bind_ncm() {
+	[ -e "$1/driver" ] && return 0
+	[ "$(cat "$1/bInterfaceClass" 2>/dev/null):$(cat "$1/bInterfaceSubClass" 2>/dev/null):$(cat "$1/bInterfaceProtocol" 2>/dev/null)" = ff:02:16 ] || return 1
+	modprobe huawei_cdc_ncm >/dev/null 2>&1
+	_tn_drv=/sys/bus/usb/drivers/huawei_cdc_ncm
+	[ -d "$_tn_drv" ] || return 1
+	echo "${1##*/}" > "$_tn_drv/bind" 2>/dev/null
+	if [ ! -e "$1/driver" ]; then
+		echo "3466 3301 ff 12d1 0" > "$_tn_drv/new_id" 2>/dev/null
+		[ -e "$1/driver" ] || echo "${1##*/}" > "$_tn_drv/bind" 2>/dev/null
+	fi
+	if [ -e "$1/driver" ]; then
+		logger -t 5gmodem-usbports "TD Tech: bound vendor NCM ${1##*/} to huawei_cdc_ncm"
+		return 0
+	fi
+	logger -t 5gmodem-usbports "TD Tech: huawei_cdc_ncm did not bind ${1##*/}"
+	return 1
+}
+
+_td_drop_serial_id() {
+	for _ts_driver in option usbserial_generic; do
+		[ -w "/sys/bus/usb/drivers/$_ts_driver/remove_id" ] || continue
+		echo "3466 3301" > "/sys/bus/usb/drivers/$_ts_driver/remove_id" 2>/dev/null
+	done
+	return 0
+}
+
+_td_prepare_usb() {
+	_td_drop_serial_id
+	modprobe cdc_ncm >/dev/null 2>&1
+	for _tp_d in /sys/bus/usb/devices/*; do
+		[ "$(cat "$_tp_d/idVendor" 2>/dev/null):$(cat "$_tp_d/idProduct" 2>/dev/null)" = 3466:3301 ] || continue
+		_tp_net=""
+		for _tp_n in "$_tp_d":*/net/*; do
+			[ -e "$_tp_n" ] && { _tp_net=1; break; }
+		done
+		[ -n "$_tp_net" ] && continue
+		pick_config "$_tp_d" 2
+		_tp_i="$_tp_d:2.0"
+		if [ "$(cat "$_tp_i/bInterfaceClass" 2>/dev/null):$(cat "$_tp_i/bInterfaceSubClass" 2>/dev/null):$(cat "$_tp_i/bInterfaceProtocol" 2>/dev/null)" = ff:02:16 ]; then
+			_tp_mark="/tmp/5gmodem/td_ncm_${_tp_d##*/}_$(cat "$_tp_d/devnum" 2>/dev/null)"
+			if [ ! -f "$_tp_mark" ] && ! modprobe huawei_cdc_ncm >/dev/null 2>&1; then
+				: > "$_tp_mark"
+				logger -t 5gmodem-usbports "TD Tech: configuration 2 has vendor NCM ff/02/16 and huawei_cdc_ncm is not installed"
+			fi
+		fi
+	done
 }
 
 _rescue_rmnet() {
@@ -122,6 +192,9 @@ _move_to_option() {
 		for _mv_i in "$_mv_d":*; do
 			[ -f "$_mv_i/bInterfaceClass" ] || continue
 			[ "$(cat "$_mv_i/bInterfaceClass" 2>/dev/null)" = ff ] || continue
+			if [ "$1:$2" = 3466:3301 ]; then
+				[ "$(cat "$_mv_i/bInterfaceSubClass" 2>/dev/null)" = 06 ] || continue
+			fi
 			[ "$(cat "$_mv_i/bInterfaceSubClass" 2>/dev/null)" = 42 ] && continue
 			if [ -n "$_mv_dn" ]; then
 				_mv_n=$(cat "$_mv_i/bInterfaceNumber" 2>/dev/null)
@@ -153,6 +226,7 @@ _move_to_option() {
 
 bind_ports() {
 	[ -n "$1" ] && [ -n "$2" ] || return 1
+	[ "$1:$2" = 3466:3301 ] && _td_prepare_usb
 
 	_rescue_data "$1" "$2"
 
@@ -175,6 +249,10 @@ bind_ports() {
 		for _bp_t in "$_bp_d":*/ttyUSB* "$_bp_d":*/tty/ttyUSB*; do
 			[ -e "$_bp_t" ] || continue
 			_move_to_option "$1" "$2"
+			if [ "$1:$2" = 3466:3301 ]; then
+				_td_drop_serial_id
+				_td_rescue_data
+			fi
 			_bp_once="/tmp/5gmodem/usbports_${_bp_d##*/}.hasports"
 			if [ ! -f "$_bp_once" ]; then
 				: > "$_bp_once" 2>/dev/null
@@ -199,6 +277,10 @@ bind_ports() {
 	if ! echo "$(newid_for "$1" "$2")" > "$_bp_path" 2>/dev/null; then
 		logger -t 5gmodem-usbports "new_id write failed for $1:$2 via $_bp_drv (kernel rejected '$(newid_for "$1" "$2")')"
 		return 1
+	fi
+	if [ "$1:$2" = 3466:3301 ]; then
+		_td_drop_serial_id
+		_td_rescue_data
 	fi
 	logger -t 5gmodem-usbports "bound $1:$2 via $_bp_drv"
 	if [ -n "$(data_iface_for "$1" "$2")" ]; then

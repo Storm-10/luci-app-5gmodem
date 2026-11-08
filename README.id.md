@@ -12,13 +12,13 @@ Ambil tautan `.apk` (OpenWrt 25.12.x) atau `.ipk` (24.10.x) dari halaman [Releas
 ### .apk (OpenWrt 25.12.x)
 ```sh
 apk update && apk add curl
-curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.24/luci-app-5gmodem-3.9.24-r1.apk > /tmp/luci-app-5gmodem.apk
+curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.29/luci-app-5gmodem-3.9.29-r1.apk > /tmp/luci-app-5gmodem.apk
 apk add /tmp/luci-app-5gmodem.apk --allow-untrusted
 ```
 
 **Tampilan bahasa Indonesia**: pasang paket bahasa Indonesia untuk aplikasi ini. LuCI sendiri belum memiliki terjemahan bahasa Indonesia, jadi menu LuCI lainnya tetap berbahasa Inggris:
 ```sh
-curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.24/luci-i18n-5gmodem-id.apk > /tmp/luci-i18n-5gmodem-id.apk
+curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.29/luci-i18n-5gmodem-id.apk > /tmp/luci-i18n-5gmodem-id.apk
 apk add /tmp/luci-i18n-5gmodem-id.apk --allow-untrusted
 ```
 Setelah itu pilih bahasanya di LuCI: Sistem → Sistem → Bahasa dan Gaya → Bahasa Indonesia.
@@ -37,13 +37,13 @@ rilis tersebut.
 ### .ipk (OpenWrt 24.10.x)
 ```sh
 opkg update && opkg install curl
-curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.24/luci-app-5gmodem_3.9.24-r1_all.ipk > /tmp/luci-app-5gmodem.ipk
+curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.29/luci-app-5gmodem_3.9.29-r1_all.ipk > /tmp/luci-app-5gmodem.ipk
 opkg install /tmp/luci-app-5gmodem.ipk
 ```
 
 **Tampilan bahasa Indonesia**:
 ```sh
-curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.24/luci-i18n-5gmodem-id.ipk > /tmp/luci-i18n-5gmodem-id.ipk
+curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/download/v3.9.29/luci-i18n-5gmodem-id.ipk > /tmp/luci-i18n-5gmodem-id.ipk
 opkg install /tmp/luci-i18n-5gmodem-id.ipk
 ```
 
@@ -109,7 +109,6 @@ Saya menambahkan fitur baru untuk modem-modem ini (dibandingkan dengan 3ginfo da
 - Tenda MF6 (ZTE ZX297520V3 Mi-Fi, USB 19d2:1557) — sinyal, baterai, SMS, dan reboot melalui web API-nya; band dan mode jaringan melalui AT dalam mode debug
 - Stik Android Qualcomm MDM9600 / MDM9610 murah (PIXLINK, ALEKA UV310 dan sejenisnya), termasuk mode "modem only" (QMI)
 - UFI003 (stik Android Qualcomm MSM8916, USB 05c6:90b4) — sinyal lewat AT, suhu dan SINR lewat ADB, mode jaringan; juga stik yang sama dengan OpenWrt, modem bawaannya dikendalikan lewat ModemManager (band, mode jaringan, SMS, pemilihan jaringan manual)
-- Mi-Fi Android MediaTek MT6735 (USB 0e8d:2004) — trafik, lama koneksi, baterai, dan mode jaringan lewat web API, enam sensor suhu lewat ADB; dengan paket opsional `5gmodem-mtk-at` juga RSRQ, SINR, RSSI, info sel, dan pergantian band LTE
 - Masih banyak lagi yang belum diuji, tetapi seharusnya mendukung semua modem yang ditangani oleh fork upstream.
 
 ### Diperbaiki dari laporan pengguna
@@ -220,17 +219,6 @@ apk add /tmp/lpac.apk --allow-untrusted
 Transport dipilih otomatis berdasarkan protokol antarmuka, jadi biasanya Anda tidak perlu mengaturnya secara manual. Pada jalur MBIM, eUICC bisa dijangkau terlepas dari slot SIM mana yang aktif, sehingga SIM fisik tetap online selama Anda bekerja dengan eSIM.
 
 `lpac` adalah dependensi **opsional** — tab eSIM hanya muncul jika `lpac` terpasang dan ada eUICC; bagian lain aplikasi tetap berfungsi tanpanya.
-
-## Router saku MediaTek: 5gmodem-mtk-at
-
-Router saku Android berbasis MediaTek MT6735 (TianJie CPE903/905/906, KuWfi CPF9xx dan sejenisnya) tidak menyediakan RSRQ, SINR, info sel, dan kontrol band di antarmuka webnya. Aplikasi mengambilnya lewat ADB dan soket `rild-atci`, untuk itu perlu paket opsional kecil `5gmodem-mtk-at`. Klien di dalamnya berjalan di router saku, bukan di router Anda, sehingga satu paket `noarch` cocok untuk semua platform. Tanpa paket ini hanya RSRP, baterai, suhu, dan mode jaringan yang tampil.
-
-```sh
-curl -L https://github.com/fildunsky/luci-app-5gmodem/releases/latest/download/5gmodem-mtk-at.apk > /tmp/mtk-at.apk
-apk add /tmp/mtk-at.apk --allow-untrusted
-```
-
-24.10.x: `5gmodem-mtk-at.ipk` + `opkg install`.
 
 ## Build dari sumber
 
