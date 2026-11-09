@@ -56,3 +56,4 @@ Why the code looks the way it does: hardware quirks, OpenWrt and LuCI pitfalls, 
 - [FM350 AT hang: valek2282 follow-up](audits/2026-11-08-valek2282-fm350-at-hang.md)
 
 - [2026-11-09 E5573 debug SMS / independent USSD ports](audits/2026-11-09-tryapkin-hilink-debug-sms.md)
+- [2026-11-09 issue #69: RM520 PCIe driver prerequisites](audits/2026-11-09-issue69-rm520-pcie.md)
