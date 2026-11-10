@@ -1,11 +1,10 @@
 _td_at() {
-	local port="$1" command="$2" response rc
-	at_lock "$port" 5 || return 1
-	response=$(timeout 8 sms_tool -d "$port" at "$command" 2>/dev/null 8>&-)
+	local response rc
+	response=$(at_query "$1" "$2" 8 5)
 	rc=$?
-	at_unlock
+	[ "$rc" = 0 ] || return "$rc"
+	[ -n "$response" ] || return 1
 	printf '%s\n' "$response"
-	return "$rc"
 }
 
 _td_ok() {
@@ -32,14 +31,6 @@ _td_up() {
 		END { exit !f }'
 }
 
-_td_autodial() {
-	_td_at "$1" 'AT^SETAUTODIAL?' | tr -d '\r" ' | awk -F'[:,]' '
-		/^\^SETAUTOD(IAL|AIL):/ {
-			if ($2 ~ /^[01]$/) print $2, $3
-			exit
-		}'
-}
-
 _td_registration() {
 	local port="$1" command response state
 	for command in 'AT+CEREG?' 'AT+C5GREG?' 'AT+CREG?'; do
@@ -51,32 +42,51 @@ _td_registration() {
 	return 1
 }
 
-_td_enable_autodial() {
-	local port="$1" state response context wanted am=0
-	state=$(_td_autodial "$port")
-	case "$state" in '1 '| '1 1') return 0 ;; esac
-	case "${state%% *}" in
-		0)
-			case "$apn$username$password" in *'"'*|*'\'*|*';'*) return 1 ;; esac
-			[ "$(printf '%s' "$apn$username$password" | tr -d '\r\n')" = "$apn$username$password" ] || return 1
-			wanted="+CGDCONT:1,\"$pdptype\",\"$apn\","
+_td_profile() {
+	printf '%s\n' "$1" | tr -d '\r' | awk '
+		/^\^SETAUTOD(IAL|AIL):/ {
+			sub(/^[^:]*:/, "")
+			quoted = 0
+			for (i = 1; i <= length($0); i++) {
+				c = substr($0, i, 1)
+				if (c == "\"") quoted = !quoted
+				if (quoted || c !~ /[ \t]/) printf "%s", c
+			}
+			printf "\n"
+			exit
+		}'
+}
+
+_td_profile_matches() {
+	local profile="$1" context
+	case "$profile" in
+		"$wanted"|"$base") return 0 ;;
+		1|1,1)
 			context=$(_td_at "$port" 'AT+CGDCONT?' | tr -d '\r ')
-			if ! printf '%s\n' "$context" | grep -Fq "$wanted"; then
-				response=$(_td_at "$port" "AT+CGDCONT=1,\"$pdptype\",\"$apn\"")
-				_td_ok "$response" || return 1
-			fi
-			case "$auth" in pap|both) am=1 ;; chap) am=2 ;; esac
-			if [ "$am" != 0 ]; then
-				response=$(_td_at "$port" "AT+CGAUTH=1,$am,\"$username\",\"$password\"")
-				_td_ok "$response" || return 1
-			fi
+			printf '%s\n' "$context" | grep -Fq "+CGDCONT:1,\"$pdptype\",\"$apn\","
+			return $?
 			;;
 	esac
-	response=$(_td_at "$port" 'AT^SETAUTODIAL=1,1')
-	_td_ok "$response" || return 1
-	state=$(_td_autodial "$port")
-	case "$state" in '1 '| '1 1') return 0 ;; esac
 	return 1
+}
+
+_td_enable_autodial() {
+	local port="$1" response profile wanted base am=0 user="$username" pass="$password"
+	case "$apn$username$password" in *'"'*|*'\'*|*';'*) return 1 ;; esac
+	[ "$(printf '%s' "$apn$username$password" | tr -d '\r\n')" = "$apn$username$password" ] || return 1
+	[ "${#apn}" -le 99 ] && [ "${#username}" -le 31 ] && [ "${#password}" -le 31 ] || return 1
+	case "$pdptype" in IP|IPV6|IPV4V6) ;; *) return 1 ;; esac
+	case "$auth" in pap|both) am=1 ;; chap) am=2 ;; *) user=""; pass="" ;; esac
+	base="1,1,\"$pdptype\",\"$apn\""
+	wanted="$base,\"$user\",\"$pass\",$am"
+	response=$(_td_at "$port" 'AT^SETAUTODIAL?')
+	profile=$(_td_profile "$response")
+	_td_profile_matches "$profile" && return 0
+	response=$(_td_at "$port" "AT^SETAUTODIAL=$wanted")
+	_td_ok "$response" || return 1
+	response=$(_td_at "$port" 'AT^SETAUTODIAL?')
+	profile=$(_td_profile "$response")
+	_td_profile_matches "$profile"
 }
 
 _td_data_ready() {
@@ -130,6 +140,11 @@ _td_bootstrap() {
 				;;
 			1|6|9) ;;
 			*)
+				if [ -z "$registration" ]; then
+					_td_error=TDTECH_REGISTRATION_UNAVAILABLE
+					echo "fibocom[$$] TD Tech: no usable registration reply on $_td_port - retrying"
+					continue
+				fi
 				_td_error=NOT_REGISTERED
 				response=$(_td_at "$_td_port" 'AT+COPS?' | tr -d '\r ')
 				case "$response" in *'+COPS:2,'*) _td_at "$_td_port" 'AT+COPS=0' >/dev/null ;; esac
@@ -187,7 +202,7 @@ _td_setup() {
 	local interface="$1" path="$2" zone context livepdp
 	local allow_roaming defaultroute peerdns delegate mtu ip4table ip6table
 	json_get_vars allow_roaming defaultroute peerdns delegate mtu ip4table ip6table
-	. /usr/share/5gmodem/atlock.sh
+	. /usr/share/5gmodem/lib.sh
 	if ! _td_bootstrap "$path"; then
 		proto_notify_error "$interface" "$_td_error"
 		return 1
@@ -198,11 +213,11 @@ _td_setup() {
 	zone=$(_fibocom_fwzone "$interface")
 	proto_init_update "$_td_netdev" 1
 	proto_send_update "$interface" || return 1
-	if [ "$livepdp" != IPV6 ]; then
+	if [ "$pdptype" != IPV6 ]; then
 		_td_add_child "$interface" 4 dhcp "$zone" || { proto_notify_error "$interface" DHCP_SETUP_FAILED; return 1; }
 	fi
-	case "$livepdp" in
+	case "$pdptype" in
 		*[vV]6*) _td_add_child "$interface" 6 dhcpv6 "$zone" || { proto_notify_error "$interface" DHCPV6_SETUP_FAILED; return 1; } ;;
 	esac
-	echo "fibocom[$$] TD Tech: USB autodial ready on $_td_netdev; addresses are managed by DHCP ($livepdp)"
+	echo "fibocom[$$] TD Tech: USB autodial ready on $_td_netdev; addresses are managed by DHCP (requested $pdptype, current $livepdp)"
 }

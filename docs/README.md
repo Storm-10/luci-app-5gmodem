@@ -52,3 +52,8 @@ Why the code looks the way it does: hardware quirks, OpenWrt and LuCI pitfalls, 
 - [Runtime and resource audit, 2026-11-07](audits/2026-11-07-runtime.md)
 - [Fork comparison, 2026-11-07](audits/2026-11-07-forks.md)
 - [Telemetry](telemetry.md)
+
+- [FM350 AT hang: a user follow-up](audits/2026-11-08-fm350-at-hang.md)
+
+- [2026-11-09 E5573 debug SMS / independent USSD ports](audits/2026-11-09-hilink-debug-sms.md)
+- [2026-11-09 issue #69: RM520 PCIe driver prerequisites](audits/2026-11-09-issue69-rm520-pcie.md)

@@ -51,7 +51,11 @@ After pushing the release tag, report that the release has been handed off to CI
 
 On a `v*` tag each build attaches its packages to a **draft** release with `gh release upload`. Not `softprops/action-gh-release`: it publishes a reused draft after upload, so the first matrix job would make the release public while the other format is still building. If the draft does not exist yet, the job creates an empty one; `|| gh release view` covers the other job having just created it.
 
-The `publish` job runs after both builds, checks that every asset the READMEs and the in-app updater point at is attached, and only then publishes the release (`--latest`) and runs `.github/scripts/readme-links.sh <version> <pkg_release>`, which rewrites the install links in all six READMEs, checks that each URL answers 200 and commits. Until publish, `releases/latest` keeps serving the previous complete release. A failed build leaves the draft unpublished.
+The `publish` job runs after both builds, checks that every asset the READMEs and the in-app updater point at is attached, and only then publishes the release (`--latest`) and runs `.github/scripts/readme-links.sh <version> <pkg_release>`, which rewrites the install links in all six READMEs, validates every README download URL against the published release's asset metadata and commits. `.github/scripts/check-readme-links.sh` calls the Python validator, which reads `gh release view` metadata and requires the exact requested tag, a public release, exact asset URLs, completed uploads and nonzero asset sizes. Missing assets, wrong filenames and stale README versions fail the step. Download-CDN HEAD and range-GET probes repeatedly returned 504 in the 3.9.31 workflow despite existing uploaded assets and successful downloads elsewhere; transient download-gateway availability is therefore not a release-metadata validation gate.
+
+ To recover only publication/README after packages are attached, run `gh workflow run build.yml -f publish_tag=v<version>`. This skips SDK builds, verifies all required attached packages and reruns the publish/link steps using the current master workflow. Re-running an old tag run uses that run's old workflow definition, so it cannot pick up later fixes to inline steps.
+
+Until publish, `releases/latest` keeps serving the previous complete release. A failed build leaves the draft unpublished.
 
 Bumping the README links in the release commit by hand used to leave a 15-20 minute window in which the install command returned 404; that is why the links are moved by CI.
 
