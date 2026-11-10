@@ -16,7 +16,73 @@ def proto_function(name):
     return re.search(r'^' + name + r'\(\) \{\n.*?^\}', source, re.M | re.S)[0]
 
 
+def autodial_source():
+    return '\n'.join(proto_function(n) for n in
+                     ('_td_enable_autodial', '_td_ok', '_td_profile', '_td_profile_matches'))
+
+
 class TdTech(unittest.TestCase):
+    def test_interface_creation_before_network_port_exists(self):
+        source = (SHARE/'mkiface.sh').read_text()
+        start = source.index('if [ -n "$AMP" ] && [ -z "$WANTWDM" ]')
+        branch = source[start:source.index('\nDEV=""; DRV=""', start)]
+        for vp, request, netdev, expected in (
+                ('3466:3301', 'auto', False, True),
+                ('3466:3301', '', False, True),
+                ('3466:3301', 'fibocom', False, True),
+                ('3466:3301', 'auto', True, True),
+                ('3466:3301', 'mbim', False, False),
+                ('3466:3301', 'atc', False, False),
+                ('2c7c:0800', 'auto', False, False)):
+            with self.subTest(vp=vp, request=request, netdev=netdev), tempfile.TemporaryDirectory() as temp:
+                base = Path(temp)
+                dev = base/'1-8'
+                dev.mkdir()
+                vendor, product = vp.split(':')
+                (dev/'idVendor').write_text(vendor)
+                (dev/'idProduct').write_text(product)
+                if netdev:
+                    (base/'1-8:2.0/net/eth4').mkdir(parents=True)
+                prefix = '''
+AMP=1-8; WANTWDM=; IF=modem2; MSEC=; _IS_ACTIVE=0
+uci() {
+    case "$*" in
+        'set '*|'-q delete '*) printf '%s\\n' "$*" >> "$RESULT" ;;
+        '-q get network.modem2.apn') echo ctnet ;;
+        '-q get network.modem2.pdptype') echo IPV4V6 ;;
+        *) return 1 ;;
+    esac
+}
+logger() { :; }
+_mk_guard_if() { :; }
+_mk_reset_transport() { :; }
+_fw_zone_add() { :; }
+stamp_iface() { :; }
+_def_metric() { echo 110; }
+ifup() { echo "ifup $1" >> "$RESULT"; }
+json() { printf '%s %s %s\\n' "$1" "$2" "$3"; }
+'''
+                script = prefix+'\n'+function('set_apn_opt', 'mkiface.sh')+'\n'+function('set_pdp_opt', 'mkiface.sh')
+                script += '\n'+branch.replace('/sys/bus/usb/devices', temp)+'\necho FALLTHROUGH\n'
+                result = shell(script, dict(os.environ, REQ=request, RESULT=temp+'/writes'))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                writes = (base/'writes').read_text() if (base/'writes').exists() else ''
+                if expected:
+                    self.assertIn('created fibocom', result.stdout)
+                    self.assertNotIn('FALLTHROUGH', result.stdout)
+                    self.assertIn('network.modem2.usbpath=1-8', writes)
+                    self.assertIn('network.modem2.pdptype=IPV4V6', writes)
+                    self.assertIn('network.modem2.apn=ctnet', writes)
+                    self.assertIn('ifup modem2', writes)
+                    if netdev:
+                        self.assertIn('network.modem2.device=eth4', writes)
+                    else:
+                        self.assertIn('delete network.modem2.device', writes)
+                        self.assertNotIn('set network.modem2.device=', writes)
+                else:
+                    self.assertEqual(result.stdout.strip(), 'FALLTHROUGH')
+                    self.assertEqual(writes, '')
+
     def test_ndis_cid_is_not_connection_state(self):
         for reply, expected in [
             ('^NDISSTATQRY: 1,1,,,"IPV4",0,,,"IPV6"', 0),
@@ -33,36 +99,36 @@ _td_up /dev/null
                 self.assertEqual(result.returncode, expected, result.stderr)
 
     def test_autodial_spelling_and_short_reply(self):
-        for reply, expected in [('^SETAUTODIAL: 1,2,"IP"', '1 2\n'),
-                                ('^SETAUTODAIL: 1,1', '1 1\n'),
-                                ('^SETAUTODIAL: 1', '1 \n'),
-                                ('^SETAUTODIAL: 0,1', '0 1\n'), ('ERROR', '')]:
-            result = shell(proto_function('_td_autodial') + '''
-_td_at() { printf '%s\r\n' "$REPLY"; }
-_td_autodial /dev/null
-''', dict(os.environ, REPLY=reply))
+        for reply, expected in [('^SETAUTODIAL: 1,2,"IP"', '1,2,"IP"\n'),
+                                ('^SETAUTODAIL: 1,1', '1,1\n'),
+                                ('^SETAUTODIAL: 1', '1\n'),
+                                ('^SETAUTODIAL: 0,1', '0,1\n'), ('ERROR', '')]:
+            result = shell(proto_function('_td_profile') + '\n_td_profile "$REPLY"\n',
+                           dict(os.environ, REPLY=reply))
             self.assertEqual(result.stdout, expected)
 
     def test_autodial_usb_alignment_is_verified(self):
-        for verify, expected in [('1 1', 0), ('1 2', 1), ('', 1)]:
+        for verify, expected in [('1,1,"IPV4V6","ctnet","","",0', 0),
+                                 ('1,2,"IPV4V6","ctnet","","",0', 1),
+                                 ('1,1,"IP","ctnet","","",0', 1), ('1', 0), ('', 1)]:
             with tempfile.TemporaryDirectory() as temp:
-                result = shell(proto_function('_td_enable_autodial') + '\n' + proto_function('_td_ok') + '''
-_td_autodial() { if [ -f "$STATE" ]; then echo "$VERIFY"; else echo '1 2'; fi; }
+                result = shell(autodial_source() + r'''
 _td_at() {
- printf '%s\n' "$*" >> "$CALLS"
- case "$*" in
-  *SETAUTODIAL=1,1) touch "$STATE"; echo OK ;;
-  *CGPADDR*) echo '+CGPADDR: 1,"10.0.0.2"' ;;
+ printf '%s\n' "$2" >> "$CALLS"
+ case "$2" in
+  'AT^SETAUTODIAL?')
+   if [ -f "$STATE" ]; then printf '^SETAUTODIAL: %s\n' "$VERIFY";
+   else echo '^SETAUTODIAL: 1,2,"IPV4V6","ctnet","","",0'; fi ;;
+  AT^SETAUTODIAL=*) touch "$STATE"; echo OK ;;
+  'AT+CGDCONT?') echo '+CGDCONT: 1,"IPV4V6","ctnet",""' ;;
  esac
 }
-_td_up() { return 0; }
-ip() { :; }; udhcpc() { :; }; sleep() { :; }
+apn=ctnet; pdptype=IPV4V6; auth=none
 _td_enable_autodial /dev/null
-'''.replace('/tmp/5gmodem/ndis_', temp + '/ndis_'),
-                    dict(os.environ, STATE=temp+'/state', CALLS=temp+'/calls', VERIFY=verify))
+''', dict(os.environ, STATE=temp+'/state', CALLS=temp+'/calls', VERIFY=verify))
                 self.assertEqual(result.returncode, expected, result.stderr)
                 commands = Path(temp+'/calls').read_text()
-                self.assertIn('AT^SETAUTODIAL=1,1', commands)
+                self.assertIn('AT^SETAUTODIAL=1,1,"IPV4V6","ctnet","","",0', commands)
                 self.assertNotIn('AT+CGDCONT=', commands)
 
     def test_bootstrap_enables_before_netdev_and_retries(self):
@@ -101,17 +167,16 @@ exit "$rc"
                 self.assertEqual((base/'calls').read_text().splitlines(),
                                  ['enable']*(failures+1)+['netdev'])
 
-    def test_autodial_off_programs_context_then_enables_usb(self):
+    def test_autodial_off_sets_complete_profile(self):
         with tempfile.TemporaryDirectory() as temp:
-            source = '\n'.join(proto_function(n) for n in ('_td_enable_autodial', '_td_ok', '_td_autodial'))
-            result = shell(source + r'''
+            result = shell(autodial_source() + r'''
 _td_at() {
  echo "$2" >> "$CALLS"
  case "$2" in
-  'AT^SETAUTODIAL?') if [ -e "$STATE" ]; then echo '^SETAUTODIAL: 1,1'; else echo '^SETAUTODIAL: 0'; fi ;;
-  'AT+CGDCONT?') echo '+CGDCONT: 1,"IP","old"' ;;
-  'AT^SETAUTODIAL=1,1') touch "$STATE"; echo OK ;;
-  *) echo OK ;;
+  'AT^SETAUTODIAL?')
+   if [ -e "$STATE" ]; then echo '^SETAUTODIAL: 1,1,"IPV4V6","ctnet","","",0';
+   else echo '^SETAUTODIAL: 0'; fi ;;
+  AT^SETAUTODIAL=*) touch "$STATE"; echo OK ;;
  esac
 }
 apn=ctnet; pdptype=IPV4V6; auth=none
@@ -119,8 +184,75 @@ _td_enable_autodial /dev/null
 ''', dict(os.environ, CALLS=temp+'/calls', STATE=temp+'/state'))
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(Path(temp+'/calls').read_text().splitlines(), [
-                'AT^SETAUTODIAL?', 'AT+CGDCONT?', 'AT+CGDCONT=1,"IPV4V6","ctnet"',
-                'AT^SETAUTODIAL=1,1', 'AT^SETAUTODIAL?'])
+                'AT^SETAUTODIAL?', 'AT^SETAUTODIAL=1,1,"IPV4V6","ctnet","","",0',
+                'AT^SETAUTODIAL?'])
+
+    def test_reported_ipv4_autodial_changes_once_to_requested_dual_stack(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = shell(autodial_source() + r'''
+_td_at() {
+ echo "$2" >> "$CALLS"
+ case "$2" in
+  'AT^SETAUTODIAL?')
+   if [ -e "$STATE" ]; then echo '^SETAUTODAIL: 1, 1, "IPV4V6", "ctnet", "", "", 0';
+   else echo '^SETAUTODIAL:1,1,"IP","ctnet","","",0'; fi ;;
+  AT^SETAUTODIAL=*) touch "$STATE"; echo OK ;;
+ esac
+}
+apn=ctnet; pdptype=IPV4V6; auth=none
+_td_enable_autodial /dev/null || exit 1
+_td_enable_autodial /dev/null
+''', dict(os.environ, CALLS=temp+'/calls', STATE=temp+'/state'))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            commands = Path(temp+'/calls').read_text().splitlines()
+            self.assertEqual(sum(c.startswith('AT^SETAUTODIAL=') for c in commands), 1)
+            self.assertNotIn('AT^SETAUTODIAL=0', commands)
+            self.assertFalse(any('NDISDUP' in c or 'CGDCONT=' in c for c in commands))
+
+    def test_matching_autodial_profile_is_not_written(self):
+        result = shell(autodial_source() + r'''
+_td_at() {
+ case "$2" in
+  'AT^SETAUTODIAL?') echo '^SETAUTODIAL: 1,1,"IPV4V6","ctnet","","",0' ;;
+  *) echo unexpected-write >&2; return 1 ;;
+ esac
+}
+apn=ctnet; pdptype=IPV4V6; auth=none
+_td_enable_autodial /dev/null
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+
+    def test_auth_profile_preserves_spaces_and_quoted_commas(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = shell(autodial_source() + r'''
+_td_at() {
+ echo "$2" >> "$CALLS"
+ case "$2" in
+  'AT^SETAUTODIAL?')
+   if [ -f "$STATE" ]; then echo '^SETAUTODIAL: 1, 1, "IPV6", "custom", "my user", "a,b", 2';
+   else echo '^SETAUTODIAL: 1,1,"IP","old","","",0'; fi ;;
+  AT^SETAUTODIAL=*) touch "$STATE"; echo OK ;;
+ esac
+}
+apn=custom; pdptype=IPV6; auth=chap; username='my user'; password='a,b'
+_td_enable_autodial /dev/null || exit 1
+_td_enable_autodial /dev/null
+''', dict(os.environ, CALLS=temp+'/calls', STATE=temp+'/state'))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            commands = Path(temp+'/calls').read_text().splitlines()
+            self.assertEqual([c for c in commands if c.startswith('AT^SETAUTODIAL=')],
+                             ['AT^SETAUTODIAL=1,1,"IPV6","custom","my user","a,b",2'])
+
+    def test_invalid_profile_cannot_send_at_commands(self):
+        for apn in ('bad"apn', 'bad;apn', 'bad\napn', 'a'*100):
+            result = shell(autodial_source() + r'''
+_td_at() { echo unexpected-command >&2; }
+apn="$BAD_APN"; pdptype=IPV4V6; auth=none
+_td_enable_autodial /dev/null
+''', dict(os.environ, BAD_APN=apn))
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stderr, '')
 
     def test_data_readiness_uses_data_cid_and_tolerates_unknown(self):
         for response, expected in [('+CGACT: 1,0\n+CGACT: 2,1', 1),
@@ -132,16 +264,59 @@ _td_data_ready /dev/null
 ''', dict(os.environ, REPLY=response))
             self.assertEqual(result.returncode, expected, result.stderr)
 
-    def test_at_busy_never_sends_and_timeout_unlocks(self):
-        for busy, expected in [('1', 'lock\n'), ('0', 'lock\nunlock\n')]:
-            result = shell(proto_function('_td_at') + r'''
-at_lock() { echo lock >&2; [ "$BUSY" = 0 ]; }
-at_unlock() { echo unlock >&2; }
-timeout() { echo send >&2; return 124; }
+    def test_at_transport_works_without_timeout_utility(self):
+        for busy, silent in [(False, False), (True, False), (False, True)]:
+            with tempfile.TemporaryDirectory() as temp:
+                source = '\n'.join([proto_function('_td_at'), function('at_query', 'lib.sh'),
+                                    function('sleep_tick_init', 'lib.sh')])
+                source = source.replace('/tmp/5gmodem', temp)
+                result = shell(source + r'''
+at_lock() { echo lock >> "$CALLS"; [ "$BUSY" = 0 ]; }
+at_unlock() { echo unlock >> "$CALLS"; }
+timeout() { echo unexpected-timeout >> "$CALLS"; return 127; }
+sms_tool() {
+ echo "$*" >> "$CALLS"
+ [ "$SILENT" = 1 ] || printf '+CEREG: 2,1\r\nOK\r\n'
+}
+AT_LOCK_FD=8
+_td_at /dev/null 'AT+CEREG?'
+''', dict(os.environ, CALLS=temp+'/calls', BUSY=str(int(busy)), SILENT=str(int(silent))))
+                calls = Path(temp+'/calls').read_text().splitlines()
+                self.assertNotIn('unexpected-timeout', calls)
+                if busy:
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(calls, ['lock'])
+                else:
+                    self.assertEqual(calls, ['lock', '-d /dev/null at AT+CEREG?', 'unlock'])
+                    self.assertEqual(result.returncode, 1 if silent else 0)
+                    self.assertEqual(result.stdout, '' if silent else '+CEREG: 2,1\nOK\n')
+
+    def test_at_watchdog_stops_silent_child_and_unlocks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = '\n'.join([proto_function('_td_at'), function('at_query', 'lib.sh'),
+                                function('sleep_tick_init', 'lib.sh')])
+            source = source.replace('/tmp/5gmodem', temp).replace('"$2" 8 5)', '"$2" 1 5)')
+            result = shell(source + r'''
+at_lock() { echo lock >> "$CALLS"; }
+at_unlock() { echo unlock >> "$CALLS"; }
+timeout() { echo unexpected-timeout >> "$CALLS"; return 127; }
+sms_tool() { exec sleep 20; }
+AT_LOCK_FD=8
 _td_at /dev/null AT
-''', dict(os.environ, BUSY=busy))
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(result.stderr, expected)
+''', dict(os.environ, CALLS=temp+'/calls'))
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, '')
+            self.assertEqual(Path(temp+'/calls').read_text(), 'lock\nunlock\n')
+            self.assertFalse(list(Path(temp).glob('atq.*')))
+
+    def test_registration_reads_reported_home_state(self):
+        for response in ('+CEREG: 2,1', '+C5GREG: 2,1,"012029","0000000021CF9401",11,4,"01.000000"'):
+            result = shell(proto_function('_td_registration') + r'''
+_td_at() { printf '%s\n' "$REPLY"; }
+_td_registration /dev/null
+''', dict(os.environ, REPLY=response))
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, '1\n')
 
     def test_dhcp_children_and_creation_failure(self):
         for protocol, rc in [('dhcp', 0), ('dhcpv6', 0), ('dhcp', 1)]:
@@ -165,7 +340,7 @@ _td_add_child modem 6 "$PROTOCOL" wan
                 self.assertIn('string:reqaddress try', result.stderr)
 
     def test_missing_vendor_netdev_is_bounded_and_roaming_is_blocked(self):
-        for roaming in (False, True):
+        for roaming in (False, True, None):
             with tempfile.TemporaryDirectory() as temp:
                 base = Path(temp)
                 dev = base/'usb/devices/1-8'
@@ -191,19 +366,23 @@ _td_bootstrap 1-8
 rc=$?
 echo "error:$_td_error"
 exit "$rc"
-''', dict(os.environ, CALLS=temp+'/calls', REGISTRATION='5' if roaming else '1'))
+''', dict(os.environ, CALLS=temp+'/calls', REGISTRATION='' if roaming is None else ('5' if roaming else '1')))
                 self.assertEqual(result.returncode, 1, result.stderr)
-                if roaming:
+                if roaming is None:
+                    self.assertIn('error:TDTECH_REGISTRATION_UNAVAILABLE', result.stdout)
+                    self.assertFalse((base/'calls').exists())
+                elif roaming:
                     self.assertIn('error:ROAMING_NOT_ALLOWED', result.stdout)
                     self.assertFalse((base/'calls').exists())
                 else:
                     self.assertIn('error:TDTECH_VENDOR_NCM', result.stdout)
                     self.assertEqual((base/'calls').read_text().splitlines(), ['enable']*6)
 
-    def test_setup_uses_live_pdp_for_persistent_dhcp_children(self):
-        for pdp, children in [('IP', ['4 dhcp']), ('IPV6', ['6 dhcpv6']),
-                              ('IPV4V6', ['4 dhcp', '6 dhcpv6'])]:
-            source = proto_function('_td_setup').replace('. /usr/share/5gmodem/atlock.sh', ':')
+    def test_setup_uses_requested_pdp_while_modem_context_changes(self):
+        for pdp, live, children in [('IP', 'IP', ['4 dhcp']), ('IPV6', 'IPV6', ['6 dhcpv6']),
+                                    ('IPV4V6', 'IPV4V6', ['4 dhcp', '6 dhcpv6']),
+                                    ('IPV4V6', 'IP', ['4 dhcp', '6 dhcpv6'])]:
+            source = proto_function('_td_setup').replace('. /usr/share/5gmodem/lib.sh', ':')
             result = shell(source + r'''
 json_get_vars() { :; }
 _td_bootstrap() { _td_port=/dev/ttyUSB7; _td_netdev=eth9; }
@@ -212,8 +391,9 @@ _fibocom_fwzone() { echo wan; }
 proto_init_update() { echo "link:$*"; }
 proto_send_update() { echo "parent:$*"; }
 _td_add_child() { echo "child:$*"; }
+pdptype="$REQUESTED_PDP"
 _td_setup modem 1-8
-''', dict(os.environ, LIVE_PDP=pdp))
+''', dict(os.environ, LIVE_PDP=live, REQUESTED_PDP=pdp))
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('link:eth9 1', result.stdout)
             self.assertEqual([line for line in result.stdout.splitlines() if line.startswith('child:')],

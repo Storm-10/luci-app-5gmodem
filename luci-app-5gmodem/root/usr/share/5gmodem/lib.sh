@@ -633,6 +633,10 @@ active_sec() {
 	secname "$_ap"
 }
 
+sim_spn_decode() {
+	printf '%s\n' "$1" | LC_ALL=C awk -f "${RES:-/usr/share/5gmodem}/sim-spn.awk"
+}
+
 operator_clean() {
 	case "$1" in
 		*' '[Rr][Uu][Ss]) _oc=${1% *}; [ -n "$_oc" ] && printf '%s' "$_oc" || printf '%s' "$1" ;;
@@ -1140,6 +1144,17 @@ is_devpath() {
 	esac
 }
 
+is_smsport() {
+	is_devpath "$1" && return 0
+	case "$1" in
+		hilink) ;;
+		*) printf '%s\n' "$1" | LC_ALL=C awk -F. '
+			NF != 4 { exit 1 }
+			{ for (i = 1; i <= 4; i++) if ($i !~ /^[0-9]+$/ || length($i) > 3 || $i > 255) exit 1 }' || return 1 ;;
+	esac
+	[ "$(uci -q get "5gmodem.$(secname "$(active_path)").kind")" = hilink ]
+}
+
 json_esc() {
 	case "$1" in
 		*\\*|*\"*|*[[:cntrl:]]*)
@@ -1219,6 +1234,9 @@ at_query() {
 			_aq_i=$((_aq_i + 1)); sleep "$_SLEEP_TICK"
 		done
 		kill -0 "$_aq_pid" 2>/dev/null || wait "$_aq_pid" 2>/dev/null
+		if kill -0 "$_aq_pid" 2>/dev/null; then
+			command -v _at_recover >/dev/null 2>&1 && _at_recover "$_aq_p"
+		fi
 		kill "$_aq_w" 2>/dev/null; wait "$_aq_w" 2>/dev/null
 	fi
 
@@ -1510,10 +1528,20 @@ hl_web_metrics() {
 	hl_brovi "$1"
 }
 
+hl_sms_web() {
+	[ "$(uci -q get "5gmodem.$1.kind")" = hilink ] || return 1
+	case "$2" in hilink|[0-9]*.[0-9]*.[0-9]*.[0-9]*) return 0 ;; esac
+	case "$(uci -q get "5gmodem.$1.vidpid")" in 12d1:*) return 0 ;; esac
+	hl_web_metrics "$1" && return 0
+	local port
+	port=$(uci -q get "5gmodem.$1.at_port")
+	! { [ -n "$port" ] && [ -c "$port" ]; }
+}
+
 hl_web_port() {
 	[ -n "$1" ] || return 1
 	for _hwp_s in $(uci -q show 5gmodem 2>/dev/null | grep -F ".at_port='$1'" | cut -d. -f2); do
-		hl_web_metrics "$_hwp_s" && return 0
+		hl_sms_web "$_hwp_s" "$1" && return 0
 	done
 	return 1
 }
