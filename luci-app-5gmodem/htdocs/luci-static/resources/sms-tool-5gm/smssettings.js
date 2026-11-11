@@ -198,18 +198,16 @@ function addReceiveIncoming(s) {
 	if (MCU) {
 		o = s.option(form.Flag, 'mcu_sms', _('Output new message(s) to GL-E750 display'),
 			_("Display is limited to Latin alphabet only. Translit will be used for Cyrillic symbols. E.g. Bud'te schastlivy!"));
-		o.default = '0';
 		o.rmempty = false;
 
 		o = s.option(form.Flag, 'mcu_last', _('Show only the last message'),
 			_('When off all unread SMS will be displayed cycling in the order of time received starting with the most recent.'));
-		o.default = '1';
 		o.rmempty = false;
 		o.depends('mcu_sms', '1');
 
 		o = s.option(form.Value, 'mcu_time', _('Time to display messages, seconds'),
 			_("Timer restarts on input. Configure actions in 'Buttons'."));
-		o.default = '10';
+		o.placeholder = '10';
 		o.datatype = 'range(1,900)';
 		o.depends('mcu_sms', '1');
 	}
@@ -327,7 +325,8 @@ function addNotifications(s) {
 	};
 
 	o = s.option(form.Flag, 'ontopsms', _('Show notification icon'),
-		_('Show the new-message notification icon on the status overview page'));
+	MCU ? _('Show the new-message notification icon on the status overview page and GL-E750 display')
+		: _('Show the new-message notification icon on the status overview page'));
 	o.rmempty = false;
 
 	o = s.option(form.Value, 'checktime', _('Check the inbox every, minutes'),
@@ -360,10 +359,8 @@ function addNotifications(s) {
 
 	o = s.option(form.ListValue, 'smsled', _('<abbr title="Light Emitting Diode">LED</abbr> name'),
 		_('Select the notification LED'));
-	if (MCU) {
+	if (MCU)
 		o.value('mcu', _('Flash GL-E750 display'));
-		o.default = 'mcu';
-	}
 	o.load = function(section_id) {
 		return L.resolveDefault(fs.list('/sys/class/leds'), []).then(L.bind(function(leds) {
 			if (leds.length > 0) {

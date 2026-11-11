@@ -6133,6 +6133,7 @@ msgstr "SMS 表示モード"
 
 msgid "This mode also activates if configured in 'Inbox'. Button actions below apply only to this mode."
 msgstr "このモードは「受信箱」で設定した場合にも有効になります。下のボタン動作はこのモードでのみ適用されます。"
+
 msgid "Select configuration"
 msgstr "設定を選択"
 
@@ -6186,3 +6187,6 @@ msgstr "再起動中…"
 
 msgid "Download the package for your OpenWrt version, upload it in System → Software, then refresh this page."
 msgstr "お使いの OpenWrt バージョン用のパッケージをダウンロードし、「システム → ソフトウェア」でアップロードしてから、このページを更新してください。"
+
+msgid "Show the new-message notification icon on the status overview page and GL-E750 display"
+msgstr "状態の概要ページと GL-E750 のディスプレイに新着メッセージの通知アイコンを表示する"
