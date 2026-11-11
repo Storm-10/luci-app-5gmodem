@@ -6183,3 +6183,6 @@ msgstr "Đang khởi động lại dịch vụ…"
 
 msgid "Restarting…"
 msgstr "Đang khởi động lại…"
+
+msgid "Show the new-message notification icon on the status overview page and GL-E750 display"
+msgstr "Hiện biểu tượng thông báo tin nhắn mới trên trang tổng quan trạng thái và màn hình GL-E750"

@@ -6468,3 +6468,6 @@ msgstr "Служба перезапускается…"
 
 msgid "Restarting…"
 msgstr "Перезапуск…"
+
+msgid "Show the new-message notification icon on the status overview page and GL-E750 display"
+msgstr "Показывать значок уведомления о новом сообщении на странице обзора состояния и на дисплее GL-E750"

@@ -6183,3 +6183,6 @@ msgstr "服務正在重新啟動…"
 
 msgid "Restarting…"
 msgstr "正在重新啟動…"
+
+msgid "Show the new-message notification icon on the status overview page and GL-E750 display"
+msgstr "在狀態概覽頁和 GL-E750 顯示屏顯示新消息通知圖標"

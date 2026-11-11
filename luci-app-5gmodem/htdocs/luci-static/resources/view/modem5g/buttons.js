@@ -398,10 +398,6 @@ function buttonCard(b, leds, services, onDelete, mcu) {
 			});
 		}) }, _('Delete')));
 
-	// GL-E750 defaults, as in mcu-switch when unset
-	if (isLong && !b.cmd_pressed) { b.cmd_pressed = MCU + ' standby'; b.ct_pressed = b.ct_pressed || 'conditional'; }
-	if (isSwitch && mcu && !b.cmd_double) { b.cmd_double = MCU + ' sms'; }
-
 	var pPanel = statePanel(b, leds, 'pressed', services, mcu);
 	var rPanel = statePanel(b, leds, 'released', services, mcu);
 	var dPanel = (isSwitch && mcu) ? statePanel(b, leds, 'double', services, mcu) : null;
