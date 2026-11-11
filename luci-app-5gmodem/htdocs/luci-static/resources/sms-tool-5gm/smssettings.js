@@ -198,18 +198,16 @@ function addReceiveIncoming(s) {
 	if (MCU) {
 		o = s.option(form.Flag, 'mcu_sms', _('Output new message(s) to GL-E750 display'),
 			_("Display is limited to Latin alphabet only. Translit will be used for Cyrillic symbols. E.g. Bud'te schastlivy!"));
-		o.default = '0';
 		o.rmempty = false;
 
 		o = s.option(form.Flag, 'mcu_last', _('Show only the last message'),
 			_('When off all unread SMS will be displayed cycling in the order of time received starting with the most recent.'));
-		o.default = '1';
 		o.rmempty = false;
 		o.depends('mcu_sms', '1');
 
 		o = s.option(form.Value, 'mcu_time', _('Time to display messages, seconds'),
 			_("Timer restarts on input. Configure actions in 'Buttons'."));
-		o.default = '10';
+		o.placeholder = '10';
 		o.datatype = 'range(1,900)';
 		o.depends('mcu_sms', '1');
 	}
@@ -327,7 +325,8 @@ function addNotifications(s) {
 	};
 
 	o = s.option(form.Flag, 'ontopsms', _('Show notification icon'),
-		_('Show the new-message notification icon on the status overview page'));
+	MCU ? _('Show the new-message notification icon on the status overview page and GL-E750 display')
+		: _('Show the new-message notification icon on the status overview page'));
 	o.rmempty = false;
 
 	o = s.option(form.Value, 'checktime', _('Check the inbox every, minutes'),
@@ -360,10 +359,8 @@ function addNotifications(s) {
 
 	o = s.option(form.ListValue, 'smsled', _('<abbr title="Light Emitting Diode">LED</abbr> name'),
 		_('Select the notification LED'));
-	if (MCU) {
+	if (MCU)
 		o.value('mcu', _('Flash GL-E750 display'));
-		o.default = 'mcu';
-	}
 	o.load = function(section_id) {
 		return L.resolveDefault(fs.list('/sys/class/leds'), []).then(L.bind(function(leds) {
 			if (leds.length > 0) {
@@ -773,6 +770,23 @@ function addSendOptions(s) {
 
 function addUssdOptions(s) {
 	var o;
+	o = s.option(form.Value, '_ussd_port', _('USSD sending port'));
+	var path = uci.get('5gmodem', '@5gmodem[0]', 'active_modem') || '';
+	var section = 'm_' + path.replace(/[^A-Za-z0-9]/g, '_');
+	[ uci.get('5gmodem', section, 'at_port'), uci.get('5gmodem', 'sms', 'ussdport'), uci.get('5gmodem', section, 'ussd_port') ].filter(function(p, i, all) {
+		return p && p.indexOf('/dev/') === 0 && all.indexOf(p) === i;
+	}).forEach(function(p) { o.value(p, p); });
+	o.placeholder = _('Auto (detect)');
+	o.rmempty = true;
+	o.cfgvalue = function() {
+		var p = uci.get('5gmodem', '@5gmodem[0]', 'active_modem') || '';
+		return uci.get('5gmodem', 'm_' + p.replace(/[^A-Za-z0-9]/g, '_'), 'ussd_port') || '';
+	};
+	o.write = function(section_id, value) {
+		var p = uci.get('5gmodem', '@5gmodem[0]', 'active_modem');
+		if (p) { uci.set('5gmodem', 'm_' + p.replace(/[^A-Za-z0-9]/g, '_'), 'ussd_port', value); }
+	};
+	o.remove = function(section_id) { return this.write(section_id, null); };
 
 	o = s.option(form.Flag, 'ussd', _('Send the USSD code as plain text'),
 		_('Send the USSD code as plain text; the command is not encoded into a PDU'));
@@ -898,7 +912,7 @@ function injectStyle() {
 }
 
 return baseclass.extend({
-	API: 30924,
+	API: 30935,
 	panel: function(group) {
 		var build = GROUPS[group];
 		if (!build)

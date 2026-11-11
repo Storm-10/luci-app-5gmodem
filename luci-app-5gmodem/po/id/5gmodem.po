@@ -6183,3 +6183,6 @@ msgstr "Layanan sedang dimulai ulang…"
 
 msgid "Restarting…"
 msgstr "Memulai ulang…"
+
+msgid "Show the new-message notification icon on the status overview page and GL-E750 display"
+msgstr "Tampilkan ikon notifikasi pesan baru di halaman ringkasan status dan layar GL-E750"
