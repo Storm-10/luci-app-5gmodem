@@ -601,6 +601,7 @@ _send_one() {
 	_send_pdu "$_so_port" "$_so_to" "$_so_txt" 2>/dev/null
 	_so_pdurc=$?
 	[ "$_so_pdurc" = 0 ] && return 0
+	_sms_tdtech "$_so_port" && return "$_so_pdurc"
 	if ! "$RES/smspdu.sh" needucs2 "$_so_txt"; then
 		_sms_run "$_so_tat" $(_smstool_at) -d "$_so_port" send "$_so_to" "$_so_txt" 2>/dev/null
 		return $?
@@ -610,6 +611,27 @@ _send_one() {
 
 _smstool_at() {
 	command -v sms_tool >/dev/null 2>&1 && echo /usr/bin/sms_tool || echo sms_tool
+}
+
+_sms_tdtech() {
+	local path
+	path=$(tty_usbpath "$1" 2>/dev/null)
+	[ -n "$path" ] || return 1
+	[ "$(cat "/sys/bus/usb/devices/$path/idVendor" 2>/dev/null):$(cat "/sys/bus/usb/devices/$path/idProduct" 2>/dev/null)" = 3466:3301 ]
+}
+
+_td_sms_submit() {
+	local response
+	response=$(_sms_run 10 $(_smstool_at) -d "$1" at 'AT+CMGF=0' 2>/dev/null)
+	printf '%s\n' "$response" | tr -d '\r' | grep -q '^OK$' || return 1
+	response=$(_sms_run 60 $(_smstool_at) -d "$1" at "AT+CMGS=$2\r$3" 2>/dev/null)
+	if printf '%s\n' "$response" | tr -d '\r' | grep -qE '^\+CMGS: *[0-9]+'; then
+		return 0
+	fi
+	printf '\033' > "$1" 2>/dev/null
+	printf '%s\n' "$response"
+	printf '%s\n' "$response" | grep -q 'ERROR' && return 1
+	return 4
 }
 
 _norm_num() {
@@ -682,6 +704,11 @@ _q_send_one() {
 
 	_send_one "$_qs_port" "$_qs_to" "$_qs_txt" slow
 	_qs_rc=$?
+	if [ "$_qs_rc" = 4 ]; then
+		mv "$_qs_f" "${_qs_f%.sms}.unknown"
+		logger -t 5gmodem "smsbridge: queued SMS result is unknown; automatic retries stopped, saved as ${_qs_f%.sms}.unknown"
+		return 4
+	fi
 
 	if [ "$_qs_rc" != 0 ] && [ "$(uci -q get "$CFG.sms.send_inhibit_mm")" = "1" ] \
 	   && _port_is_mm "$_qs_port" && command -v mmcli >/dev/null 2>&1; then
@@ -727,9 +754,20 @@ _send_pdu() {
 	_sp_parts=$("$RES/smspdu.sh" encode "$2" "$3" 2>/dev/null)
 	[ -n "$_sp_parts" ] || { echo "pdu encode failed" >&2; return 1; }
 	_sp_rc=0
+	_sp_sent=0
 	while read -r _sp_len _sp_pdu; do
 		[ -n "$_sp_pdu" ] || continue
 		[ "$_sp_rc" = 0 ] || break
+		if [ "$_sp_cmd" = CMGS ] && _sms_tdtech "$_sp_port"; then
+			_td_sms_submit "$_sp_port" "$_sp_len" "$_sp_pdu"
+			_sp_rc=$?
+			if [ "$_sp_rc" = 0 ]; then
+				_sp_sent=$((_sp_sent + 1))
+			elif [ "$_sp_sent" -gt 0 ]; then
+				_sp_rc=4
+			fi
+			continue
+		fi
 		stty -F "$_sp_port" 115200 raw -echo 2>/dev/null
 		_sp_ans=""
 		if command exec 3<>"$_sp_port" 2>/dev/null; then
@@ -765,6 +803,7 @@ PARTS_EOF
 	if [ "$_sp_rc" = 0 ]; then
 		return 0
 	fi
+	[ "$_sp_rc" = 4 ] && return 4
 	echo "sms sending failed: ${_SP_LASTERR:-no answer from modem}" >&2
 	return 1
 }
@@ -838,9 +877,13 @@ case "$BOX" in
 		_dj_write running ;;
 esac
 
-_sb_p=$(uci -q get "5gmodem.$_TGT_SEC.at_port")
-[ -n "$_sb_p" ] || _sb_p=$(uci -q get "5gmodem.@5gmodem[0].at_port")
-if [ "$(_active_kind)" = "hilink" ] && { hl_web_metrics "$_TGT_SEC" || ! { [ -n "$_sb_p" ] && [ -c "$_sb_p" ]; }; }; then
+if [ -z "$PORT" ]; then
+	case "$BOX" in
+		send|queue-run|queue-list) PORT=$(uci -q get "$CFG.sms.sendport") ;;
+		*) PORT=$(uci -q get "$CFG.sms.readport") ;;
+	esac
+fi
+if hl_sms_web "$_TGT_SEC" "$PORT"; then
 	case "$BOX" in
 		sent) "$RES/hilink.sh" smsread out "$_TGT_PATH" ;;
 		status)
@@ -908,11 +951,26 @@ _sms_run() {
 	   && ! _via_mm && at_long_busy "$PORT"; then
 		return 1
 	fi
-	"$@" 2>/dev/null &
+	_sr_o=$(mktemp /tmp/5gmodem-smsrun.XXXXXX) || return 1
+	"$@" > "$_sr_o" 2>/dev/null </dev/null 7>&- 8>&- 9>&- &
 	_sr_p=$!
-	( exec >/dev/null 2>&1 8>&- 9>&-; sleep "$_sr_t"; kill "$_sr_p" 2>/dev/null ) </dev/null & _sr_w=$!
-	wait "$_sr_p"; _sr_rc=$?
+	( exec >/dev/null 2>&1 7>&- 8>&- 9>&-; sleep "$_sr_t"; kill "$_sr_p" 2>/dev/null ) </dev/null & _sr_w=$!
+	if (sleep 0.0) 2>/dev/null; then _sr_step=0.1; _sr_max=$(( (_sr_t + 1) * 10 ));
+	else _sr_step=1; _sr_max=$((_sr_t + 1)); fi
+	_sr_i=0
+	while kill -0 "$_sr_p" 2>/dev/null && [ "$_sr_i" -lt "$_sr_max" ]; do
+		_sr_i=$((_sr_i + 1)); sleep "$_sr_step"
+	done
+	if kill -0 "$_sr_p" 2>/dev/null; then
+		kill -9 "$_sr_p" 2>/dev/null
+		_sr_rc=124
+		command -v _at_recover >/dev/null 2>&1 && _at_recover "$PORT"
+	else
+		wait "$_sr_p" 2>/dev/null; _sr_rc=$?
+	fi
 	kill "$_sr_w" 2>/dev/null; wait "$_sr_w" 2>/dev/null
+	cat "$_sr_o"
+	rm -f "$_sr_o"
 	return $_sr_rc
 }
 
@@ -1507,7 +1565,7 @@ case "$BOX" in
 				_arch_on && _arch_wipe
 				_sms_run 40 $(_smstool) -d "$PORT" delete all
 				for _dl_i in $(_sms_run 45 $(_smstool) "$@" recv \
-						| jsonfilter -e '@.msg[*].index' 2>/dev/null); do
+						| jsonfilter -e '@.msg[*].index' 2>/dev/null | sort -rn); do
 					case "$_dl_i" in ''|*[!0-9]*) continue ;; esac
 					_sms_run 12 $(_smstool) -d "$PORT" delete "$_dl_i"
 				done
@@ -1538,6 +1596,9 @@ case "$BOX" in
 			fi
 		done
 		[ -n "$_dr_live" ] || { _dj_write done; exit 0; }
+		if _sms_tdtech "$PORT"; then
+			_dr_live=$(printf '%s\n' "$_dr_live" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -rn)
+		fi
 		_dr_why=""
 		if [ -z "$PORT" ]; then
 			_dr_why=noport
@@ -1617,12 +1678,17 @@ case "$BOX" in
 			fi
 		fi
 		_snd_out=$(_send_one "$PORT" "$SND_TO" "$SND_TXT" 2>/dev/null)
-		if [ $? = 0 ]; then
+		_snd_rc=$?
+		if [ "$_snd_rc" = 0 ]; then
 			case "$_snd_out" in
 				*sucessfully*) printf '%s\n' "$_snd_out" ;;
 				*) echo "sms sent sucessfully" ;;
 			esac
 			exit 0
+		fi
+		if [ "$_snd_rc" = 4 ]; then
+			echo "SMS result is unknown: the modem did not confirm submission; check delivery before sending again"
+			exit 1
 		fi
 		if _q_enqueue "$SND_TO" "$SND_TXT" "$PORT"; then
 			echo "sms queued: sending failed now, will retry when possible"
@@ -1641,12 +1707,14 @@ case "$BOX" in
 	queue-list)
 		printf '{"queued":['
 		_ql_n=0
-		for _ql_f in "$SMSQ_DIR"/*.sms; do
+		for _ql_f in "$SMSQ_DIR"/*.sms "$SMSQ_DIR"/*.unknown; do
 			[ -f "$_ql_f" ] || continue
 			_ql_to=$(sed -n 's/^to=//p' "$_ql_f" | head -1)
 			_ql_tr=$(sed -n 's/^tries=//p' "$_ql_f" | head -1)
 			[ "$_ql_n" = 0 ] || printf ','
-			printf '{"to":"%s","tries":%s}' "$_ql_to" "${_ql_tr:-0}"
+			_ql_state=queued
+			case "$_ql_f" in *.unknown) _ql_state=unknown ;; esac
+			printf '{"to":"%s","tries":%s,"state":"%s"}' "$_ql_to" "${_ql_tr:-0}" "$_ql_state"
 			_ql_n=$((_ql_n + 1))
 		done
 		printf ']}\n'

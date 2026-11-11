@@ -5,12 +5,19 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      publish_tag:
+        description: 'Publish an existing built release and refresh README links (skip builds)'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
 
 jobs:
   build:
+    if: ${{ !inputs.publish_tag }}
     name: ${{ matrix.label }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -42,12 +49,6 @@ jobs:
 
       - name: Download SDK
         run: .github/scripts/fetch-sdk.sh ${{ matrix.ver }} x86/64 sdk
-
-      - name: Build the MediaTek pocket-router AT client
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu
-          ./5gmodem-mtk-at/build-usock.sh
 
       - name: Check embedded icons
         run: python3 luci-app-5gmodem/tools/gen-icons.py --check
@@ -84,13 +85,6 @@ jobs:
         run: |
           mkdir -p out
           find built/ -type f \( -name '*5gmodem*.ipk' -o -name '*5gmodem*.apk' \) -exec cp -v {} out/ \;
-          for f in out/5gmodem-mtk-at[-_]*; do
-            [ -e "$f" ] || continue
-            case "$f" in
-              *.apk) mv -v "$f" out/5gmodem-mtk-at.apk ;;
-              *.ipk) mv -v "$f" out/5gmodem-mtk-at.ipk ;;
-            esac
-          done
           for f in out/luci-i18n-5gmodem-*; do
             [ -e "$f" ] || continue
             base=$(basename "$f")
@@ -126,14 +120,14 @@ jobs:
   publish:
     name: Publish release, point README links
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ always() && ((startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success') || (github.event_name == 'workflow_dispatch' && inputs.publish_tag != '')) }}
     runs-on: ubuntu-latest
     concurrency:
-      group: publish-${{ github.ref_name }}
+      group: publish-${{ inputs.publish_tag || github.ref_name }}
       cancel-in-progress: false
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ inputs.publish_tag || github.ref_name }}
     steps:
       - name: Checkout master
         uses: actions/checkout@v4
@@ -153,8 +147,7 @@ jobs:
                       "luci-app-5gmodem_$V-r${R}_all.ipk" "luci-app-5gmodem-lite_$V-r${R}_all.ipk" \
                       "luci-i18n-5gmodem-zh-cn.apk" "luci-i18n-5gmodem-zh-cn.ipk" \
                       "luci-i18n-5gmodem-vi.apk" "luci-i18n-5gmodem-vi.ipk" \
-                      "luci-i18n-5gmodem-id.apk" "luci-i18n-5gmodem-id.ipk" \
-                      "5gmodem-mtk-at.apk" "5gmodem-mtk-at.ipk"; do
+                      "luci-i18n-5gmodem-id.apk" "luci-i18n-5gmodem-id.ipk"; do
             if printf '%s\n' "$NAMES" | grep -qxF "$WANT"; then
               echo "ok      $WANT"
             else
@@ -172,13 +165,7 @@ jobs:
         run: |
           set -e
           .github/scripts/readme-links.sh "$PKG_V" "$PKG_R"
-          FAIL=0
-          for U in $(grep -hoE 'https://github.com/fildunsky/luci-app-5gmodem/releases/download/[^ )<>"]+' README*.md | sort -u); do
-            CODE=$(curl -sIL -o /dev/null -w '%{http_code}' "$U")
-            echo "$CODE $U"
-            [ "$CODE" = 200 ] || FAIL=1
-          done
-          [ "$FAIL" = 0 ] || { echo "::error::a README link does not resolve - not committing"; exit 1; }
+          .github/scripts/check-readme-links.sh
           if git diff --quiet -- README.md README.ru.md README.zh-CN.md README.ja.md README.vi.md README.id.md; then
             echo "README links already point at $TAG"
             exit 0

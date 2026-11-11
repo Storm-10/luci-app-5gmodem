@@ -6133,6 +6133,7 @@ msgstr "Chế độ hiển thị SMS"
 
 msgid "This mode also activates if configured in 'Inbox'. Button actions below apply only to this mode."
 msgstr "Chế độ này cũng được kích hoạt nếu được cấu hình trong \"Hộp thư đến\". Thao tác nút bên dưới chỉ áp dụng cho chế độ này."
+
 msgid "Select configuration"
 msgstr "Chọn cấu hình"
 
@@ -6183,6 +6184,9 @@ msgstr "Đang khởi động lại dịch vụ…"
 
 msgid "Restarting…"
 msgstr "Đang khởi động lại…"
+
+msgid "Download the package for your OpenWrt version, upload it in System → Software, then refresh this page."
+msgstr "Tải gói phù hợp với phiên bản OpenWrt, tải lên trong Hệ thống → Phần mềm, rồi làm mới trang này."
 
 msgid "Show the new-message notification icon on the status overview page and GL-E750 display"
 msgstr "Hiện biểu tượng thông báo tin nhắn mới trên trang tổng quan trạng thái và màn hình GL-E750"
