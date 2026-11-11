@@ -6418,6 +6418,7 @@ msgstr "Режим показа SMS"
 
 msgid "This mode also activates if configured in 'Inbox'. Button actions below apply only to this mode."
 msgstr "Этот режим также включается, если это настроен во «Входящие». Действия кнопок ниже работают только в этом режиме."
+
 msgid "Select configuration"
 msgstr "Выбрать конфигурацию"
 
@@ -6471,3 +6472,6 @@ msgstr "Перезапуск…"
 
 msgid "Download the package for your OpenWrt version, upload it in System → Software, then refresh this page."
 msgstr "Скачайте пакет для вашей версии OpenWrt, загрузите его в разделе «Система → Программное обеспечение», затем обновите эту страницу."
+
+msgid "Show the new-message notification icon on the status overview page and GL-E750 display"
+msgstr "Показывать значок уведомления о новом сообщении на странице обзора состояния и на дисплее GL-E750"

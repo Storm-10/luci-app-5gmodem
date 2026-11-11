@@ -544,8 +544,12 @@ case "$1" in
 			if [ -n "$_REG_FLAT" ] && [ "$_smw_iv" -gt 0 ] && [ -z "$_sw_bgo" ] \
 			   && [ "$((_smw_now - _smw_prev))" -ge "$_smw_iv" ]; then
 				printf '%s' "$_smw_now" > /tmp/5gmodem/sms_new.stamp 2>/dev/null
-				"$RES/smsbridge.sh" newdump > /tmp/5gmodem/sms_new.json.tmp 2>/dev/null \
-					&& mv /tmp/5gmodem/sms_new.json.tmp /tmp/5gmodem/sms_new.json 2>/dev/null
+				if "$RES/smsbridge.sh" newdump > /tmp/5gmodem/sms_new.json.tmp 2>/dev/null \
+					&& mv /tmp/5gmodem/sms_new.json.tmp /tmp/5gmodem/sms_new.json 2>/dev/null; then
+					# sms.newsms_hook: command run after each refresh of sms_new.json (e.g. a display or LED script)
+					_smw_hook=$(uci -q get 5gmodem.sms.newsms_hook)
+					[ -n "$_smw_hook" ] && sh -c "$_smw_hook" >/dev/null 2>&1 </dev/null &
+				fi
 			fi
 			if [ -n "$_REG_FLAT" ]; then
 			[ -n "$_sw_bgo" ] || "$RES/smscmd.sh" run >/dev/null 2>&1
