@@ -6133,6 +6133,7 @@ msgstr "短信显示模式"
 
 msgid "This mode also activates if configured in 'Inbox'. Button actions below apply only to this mode."
 msgstr "如果在“收件箱”中进行了配置，此模式也会启用。下方的按键操作仅适用于此模式。"
+
 msgid "Select configuration"
 msgstr "选择配置"
 
@@ -6183,6 +6184,9 @@ msgstr "服务正在重启…"
 
 msgid "Restarting…"
 msgstr "正在重启…"
+
+msgid "Download the package for your OpenWrt version, upload it in System → Software, then refresh this page."
+msgstr "下载适用于您的 OpenWrt 版本的软件包，在“系统 → 软件包”中上传，然后刷新此页面。"
 
 msgid "Show the new-message notification icon on the status overview page and GL-E750 display"
 msgstr "在状态概览页和 GL-E750 显示屏显示新消息通知图标"

@@ -4,6 +4,14 @@ Every SMS operation in the app goes through one script, `root/usr/share/5gmodem/
 
 Related docs: [notifications.md](notifications.md) (Telegram/ntfy/webhook, SMS commands, LED, cron), [ussd.md](ussd.md).
 
+## TD Tech MT5700 SMS
+
+The `3466:3301` path is selected from the send port's own USB ancestry, not the globally active modem. It uses the existing UCS2/concatenated PDU encoder, but submits each part as `AT+CMGS=<length>` followed by a literal backslash and `r`, then the PDU, in one AT command. This follows the reference implementation's documented hardware behavior: no input prompt or Ctrl-Z is needed. `AT+CMGF=0` must succeed first; only `+CMGS: <reference>` confirms submission. An `OK` without a message reference is insufficient.
+
+There is no immediate generic-send fallback on this modem. A timed-out submission may have reached the network, and restarting a multipart send after some parts were accepted duplicates those parts. Such results return code 4 and do not enter the outgoing retry queue. If an already queued message encounters this result, its entry is retained as `.unknown` and excluded from automatic retry; `queue-list` exposes `state=unknown`. Inspect delivery before resubmitting it.
+
+Reading and storage continue through `sms_tool` and the existing three-memory `CPMS` handling. Batch deletions run from the highest slot down because MT5700 may compact indices after deletion. This is verified with local behavior checks, not a live SIM; receive decoding, actual SMS delivery and SIM/ME persistence still require the field test. IMS/CEUS provisioning from the reference's specialized settings screen is not applied automatically.
+
 ## smsbridge.sh verbs
 
 | Verb | Purpose |
@@ -40,7 +48,7 @@ The target modem is `SMS_MODEM=<usb path>`. When it is not set, the active modem
 
 - Reads take `at_lock` (atlock.sh) with a 15 s timeout. Before this, reads running in parallel with metric polling came back truncated, and other commands' answers ended up in the message text. If the lock times out, a read goes ahead anyway: losing messages is worse than the risk of mixed output.
 - `at_lock` sets nothing on failure (`_AT_LOCK_HELD` stays empty), so "did we get the lock" is taken from its return code (`_AT_LOCKED`). Testing the variable meant the send guard never fired (audit 2026-09-12).
-- `_sms_run <timeout> cmd...` runs `sms_tool` in the background with a watchdog, because `sms_tool` has no timeout of its own. An L850/XMM silently hangs on `delete all` (2026-07-31). Every SMS operation after it queued forever, and the page spun "Loading messages" endlessly. The watchdog closes the port fds (`8>&- 9>&-`), like `at_query`. If another process holds the port in a long operation (`at_long_busy`), the call returns early.
+- `_sms_run <timeout> cmd...` runs `sms_tool` in the background with a watchdog, because `sms_tool` has no timeout of its own. The parent polls only until timeout plus one second; a surviving child receives KILL and returns timeout status 124 without an unbounded wait. Child output is buffered in a private temporary file so a stuck child cannot retain the command-substitution pipe, and normal output/exit codes are preserved. The child and timer close descriptors 7/8/9. Sending TERM followed by an unconditional wait is insufficient when a worker cannot exit, as seen in the [FM350 follow-up](../audits/2026-11-08-valek2282-fm350-at-hang.md). An L850/XMM silently hangs on `delete all` (2026-07-31). Every SMS operation after it queued forever, and the page spun "Loading messages" endlessly. For FM350 interface 06, surviving workers can also schedule the [restricted serial recovery](../audits/2026-11-08-valek2282-fm350-at-hang.md#local-fm350-serial-recovery-added-on-2026-11-09). The watchdog closes the port fds (`8>&- 9>&-`), like `at_query`. If another process holds the port in a long operation (`at_long_busy`), the call returns early.
 - `queue-run` with an empty queue exits before the lock, and before sourcing `lib.sh`. It runs every `sessionwatch` round, and its idle waits of up to 15 s piled up with the real readers until they choked the SMS page (2026-08-10).
 - `status` while the port is busy returns the last good answer from `/tmp/5gmodem/smsstatus_<port>`. A counter has nothing to lose. One more waiter on a hung port also used the short `-s ME` form, which moves FM350 reception to the SIM (see below). Field report from 2026-09-14 (FM350-GL, app 2.5.1): `sms_tool -s ME status` stuck in D state on ttyUSB3, and the metrics port busy for eight minutes.
 
@@ -235,3 +243,7 @@ With a string as the third argument, LuCI's `E(tag, props, 'string')` sets `inne
 ### Lock policy regression coverage (2026-11-07 audit)
 
 The ordinary read-lock timeout fallback above is intentional and preserved: a failed `at_lock` alone must not suppress inbox reads. Long AT operations still suppress reads through `at_long_busy`. The PDU sender explicitly acquires the requested port's lock before encoding or writing; sending remains stricter than reading, including queue and fallback entry points. Offline regression tests cover both policies separately.
+
+## HiLink SMS with debug AT ports
+
+`hl_sms_web` in `lib.sh` decides SMS transport independently of `hl_web_metrics`. Huawei modems registered as `kind=hilink` keep the HTTP inbox, sent folder, counts, send and delete operations when debug composition exposes an AT metrics port. Their CPMS setup is also skipped: HTTP SMS storage is managed by the modem's API. Other serial-capable vendors retain their AT default unless an existing special web profile or an explicit HiLink/IP SMS port selects HTTP. Port defaults are loaded before the transport decision, and `smsopt` accepts valid IPv4/HiLink selections only for an active HiLink modem. Changing the selected SMS transport does not require a reboot or clearing the metrics AT port. See the [E5573 field audit](../audits/2026-11-09-tryapkin-hilink-debug-sms.md).

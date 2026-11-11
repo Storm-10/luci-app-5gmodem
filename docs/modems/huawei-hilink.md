@@ -47,6 +47,23 @@ The setting is `RoamAutoConnectEnable` in `/api/dialup/connection`, the same tog
 
 ### SMS
 
+Field report from Anton Tryapkin, 2026-11-07: E5573Bs-320 now reports
+SoftwareVersion `21.329.01.00.00`, WebUIVersion `17.100.15.02.44`, and
+`password_type=4`. The SMS request in an already authenticated browser returned
+a valid response with Count=3 and indices 40005/40004/40003 (RSCHS/MTC senders,
+SaveType=4, SmsType=2). Content includes blank lines and hexadecimal numeric
+entities such as `&#x2F;` for `/`. The parser now decodes decimal and hexadecimal
+XML character references, including UTF-8, exactly once. The supplied response
+format is covered by an offline regression test.
+
+This confirms SMS API availability in the browser session, not successful router
+authentication or resolution of the original app symptom. The HTTP status was
+not included in the reply. The user's firmware/WebUI source links are
+[firmware](https://4pda.to/forum/index.php?showtopic=687148&view=findpost&p=98900131)
+and [WebUI](https://4pda.to/forum/index.php?showtopic=678549&view=findpost&p=56372827);
+their contents were unavailable during this check. These observations describe
+the updated firmware, not the earlier installation.
+
 - `sms_list` prints the `sms_tool -j` format (`{"msg":[...]}`), so the pages parse AT and HTTP SMS the same way. The firmware joins multipart messages itself, so `part/total` is 1/1. BoxType 1 is the inbox, 2 the outbox.
 - Records are emitted on `</Message>`, not on `<Smstat>`. `Smstat` comes first in the block, and emitting on it produced an empty first record and shifted the rest by one.
 - XML is split at tag boundaries before parsing, so compact single-line and formatted responses both work. `Content` can be multiline; XML entities are decoded after collection.
@@ -95,3 +112,7 @@ The older `modem/hilink/huawei_hilink.sh` path remains separate from the primary
 Huawei POST serialization uses an automatically released flock rather than a directory lock, so killing an exporter or RPC process cannot leave POSTs permanently busy. GET token/session refresh concurrency is a separate concern and is not changed by this lock.
 
 Session files, POST locks and failed-login backoff are keyed by both the modem path and its private address. Two Huawei devices commonly expose the same `192.168.8.1`; keying by address alone mixed their session cookies and let one failed login delay the other device. Existing address-only cache files are ignored and sessions are refreshed normally.
+
+## E5573 debug SMS routing (2026-11-09)
+
+Tryapkin's paired 3.9.25 reports show E5573Bs-320 firmware 21.329.01.00.00 with a responding HTTP API in both `12d1:14db` normal and `12d1:1566` debug compositions. The application incorrectly treated the appearance of an AT metrics port as a reason to use AT SMS. SMS now stays on the Huawei API, independently of the AT metrics port; the USSD panel offers a separate per-modem serial-port override. The [paired-report audit](../audits/2026-11-09-tryapkin-hilink-debug-sms.md) records the evidence, persistence defect and required hardware follow-up. The reports establish the routing defect but do not contain the failed raw SMS exchange or confirm the new implementation on the router.
