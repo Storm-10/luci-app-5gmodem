@@ -444,7 +444,9 @@ case "$1" in
 
 		_sweep_n=0
 		while :; do
-			if ! pidof ModemManager >/dev/null 2>&1 \
+			_SW_STBY=""
+			standby_active && _SW_STBY=1
+			if [ -z "$_SW_STBY" ] && ! pidof ModemManager >/dev/null 2>&1 \
 			   && ! uci -q show network 2>/dev/null | grep -qE "\.proto='?($(proto_re proxy))'?\$"; then
 				_ps_if=$(uci -q get 5gmodem.@5gmodem[0].network)
 				if proto_in direct "$(uci -q get "network.$_ps_if.proto" 2>/dev/null)"; then
@@ -509,10 +511,10 @@ case "$1" in
 					"$RES/modemswitch.sh" resolve >/dev/null 2>&1
 				fi
 			fi
-			[ -n "$_SW_NETONLY" ] || check_once
+			[ -n "$_SW_NETONLY$_SW_STBY" ] || check_once
 			_page_refresh
-			[ -n "$_SW_NETONLY" ] || warm_snapshots
-			[ -n "$_SW_NETONLY" ] || warm_active
+			[ -n "$_SW_NETONLY$_SW_STBY" ] || warm_snapshots
+			[ -n "$_SW_NETONLY$_SW_STBY" ] || warm_active
 			_page_refresh
 			"$RES/health.sh" tick >/dev/null 2>&1
 			_page_refresh
@@ -533,7 +535,7 @@ case "$1" in
 			else
 				rm -f /tmp/5gmodem/ucidelta
 			fi
-			"$RES/tgnotify.sh" tick >/dev/null 2>&1
+			[ -n "$_SW_STBY" ] || "$RES/tgnotify.sh" tick >/dev/null 2>&1
 			_sw_bgo=""
 			[ -n "$_REG_FLAT" ] && bg_at_off && _sw_bgo=1
 			_smw_now=$(cut -d. -f1 /proc/uptime 2>/dev/null)
@@ -578,8 +580,8 @@ case "$1" in
 				case "$_ipw" in *:*) continue ;; esac
 				is_iphone "${_ipw##*/}" && { usbmuxd_ensure >/dev/null 2>&1; break; }
 			done
-			"$RES/telemetry.sh" tick >/dev/null 2>&1
-			"$RES/stapark.sh" tick >/dev/null 2>&1
+			[ -n "$_SW_STBY" ] || "$RES/telemetry.sh" tick >/dev/null 2>&1
+			[ -n "$_SW_STBY" ] || "$RES/stapark.sh" tick >/dev/null 2>&1
 			"$RES/mobile.sh" tick >/dev/null 2>&1
 		done
 		;;

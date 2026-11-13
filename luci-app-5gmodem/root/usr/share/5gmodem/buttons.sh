@@ -84,14 +84,11 @@ _code_name() {
 	esac
 }
 
-_mcu() { [ -x /usr/bin/mcu-switch ] && case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in glinet,gl-e750*) ;; *) false ;; esac; }
-
 _dts_buttons() {
 	_force_key=0
 	case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
 		huasifei,wh3000*) _force_key=1 ;;
 	esac
-	_mcu && printf 'power\tLong press\tbutton\n'
 	_dtb=/sys/firmware/devicetree/base
 	for _cf in "$_dtb"/*/compatible "$_dtb"/*/*/compatible; do
 		[ -f "$_cf" ] || continue
@@ -109,7 +106,6 @@ _dts_buttons() {
 				_ith=$(hexdump -v -e '/1 "%02x"' "${_b}linux,input-type" 2>/dev/null)
 				[ "$((0x${_ith:-0}))" = 5 ] && _type=switch
 			fi
-			[ "$_nm" = BTN_0 ] && _mcu && _type=switch
 			printf '%s\t%s\t%s\n' "$_nm" "$_lbl" "$_type"
 		done
 	done
@@ -119,11 +115,20 @@ _is_system() { [ "$1" = "reset" ]; }
 
 _json_esc() { sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
-# $1 command -> 0 on (service running / standby on), 1 off, 2 unknown
+# Extensions: buttons.d/*.sh redefine these hooks. Contract: docs/subsystems/extensions.md
+_STATES="pressed released"	# button states with an action
+_ext_buttons() { cat; }		# filter of the detected buttons: name<TAB>label<TAB>type
+_ext_cond() { return 3; }	# $1 command -> 0 on, 1 off, 2 unknown, 3 not mine
+_ext_detect() { :; }		# extra members of the detect JSON, each followed by a comma
+_ext_run() { :; }		# $1 button, $2 state; non-zero: skip the action
+_ext_cmd() { return 1; }	# extra verbs, "$@"; non-zero: not mine
+for _x in /usr/share/5gmodem/buttons.d/*.sh; do [ -f "$_x" ] && . "$_x"; done
+_is_state() { case " $_STATES " in *" $1 "*) return 0 ;; esac; return 1; }
+
+# $1 command -> 0 on (service running), 1 off, 2 unknown
 _cond() {
-	case "$1" in *mcu-switch\ standby*) [ "$(uci -q get mcu.global.power_saveing)" = 1 ]; return ;;
-		*mcu-switch\ metrics*) [ -n "${MCU_K+x}" ] && { [ "$MCU_K" = m ]; return; }	# set by mcu-switch: previous screen
-			read -r _p _k 2>/dev/null < /tmp/mcu-switch.pid && [ "$_k" = m ] && kill -0 "$_p" 2>/dev/null; return ;; esac
+	_ext_cond "$1"; _rc=$?
+	[ "$_rc" = 3 ] || return "$_rc"
 	_svc=$(printf '%s' "$1" | sed -n 's/.*svc[[:space:]]\{1,\}[a-z]\{1,\}[[:space:]]\{1,\}\([A-Za-z0-9_.-]\{1,\}\).*/\1/p')
 	[ -n "$_svc" ] || _svc=$(printf '%s' "$1" | sed -n 's#.*/etc/init.d/\([A-Za-z0-9_.-]\{1,\}\).*#\1#p')
 	[ -n "$_svc" ] && [ -x "/etc/init.d/$_svc" ] || return 2
@@ -132,7 +137,7 @@ _cond() {
 
 _sync_leds_all() {
 	for _s in $(uci show "$CFG" 2>/dev/null | sed -n "s/^$CFG\.\([^.=]*\)=button\$/\1/p"); do
-		for _st in pressed released double; do
+		for _st in $_STATES; do
 			[ "$(uci -q get "$CFG.$_s.ct_$_st")" = "conditional" ] || continue
 			_cond "$(uci -q get "$CFG.$_s.$_st")"
 			case $? in
@@ -146,13 +151,11 @@ _sync_leds_all() {
 case "$1" in
 detect)
 	_jf() { printf '%s' "$(uci -q get "$CFG.$1.$2" 2>/dev/null)" | _json_esc; }
-	_mcu && printf '{"mcu":{"sms":%s,"flip":"%s","double":"%s","long":"%s"},' \
-		"$(uci -q get "$CFG.sms" >/dev/null && echo 1 || echo 0)" \
-		"$(_jf sms mcu_flip)" "$(_jf sms mcu_double)" "$(_jf sms mcu_long)"
-	_mcu || printf '{'
+	printf '{'
+	_ext_detect
 	printf '"buttons":['
 	_f=1
-	_dts_buttons | sort -u | while IFS='	' read -r _name _label _type; do
+	_dts_buttons | _ext_buttons | sort -u | while IFS='	' read -r _name _label _type; do
 		[ -n "$_name" ] || continue
 		[ -n "$_type" ] || _type=button
 		_def=0; _is_system "$_name" && _def=1
@@ -162,12 +165,11 @@ detect)
 		printf '{"name":"%s","label":"%s","type":"%s","default":%d,"btntype":"%s","debounce":"%s"' \
 			"$_name" "$(printf '%s' "$_label" | _json_esc)" "$_type" "$_def" \
 			"$(_jf "$_s" btntype)" "$(_jf "$_s" debounce)"
-		for _st in pressed released double; do
-			printf ',"ct_%s":"%s","cmd_%s":"%s","svc_%s":"%s","en_%s":"%s"' \
+		for _st in $_STATES; do
+			printf ',"ct_%s":"%s","cmd_%s":"%s","svc_%s":"%s"' \
 				"$_st" "$(_jf "$_s" "ct_$_st")" \
 				"$_st" "$(_jf "$_s" "$_st")" \
-				"$_st" "$(_jf "$_s" "svc_$_st")" \
-				"$_st" "$(_jf "$_s" "en_$_st")"
+				"$_st" "$(_jf "$_s" "svc_$_st")"
 			printf ',"leds_%s":"%s","ledson_%s":"%s","ledsoff_%s":"%s"' \
 				"$_st" "$(_jf "$_s" "leds_$_st")" \
 				"$_st" "$(_jf "$_s" "leds_on_$_st")" \
@@ -191,7 +193,8 @@ services)
 	;;
 set)
 	[ -n "$2" ] || { echo '{"error":"no button"}'; exit 0; }
-	case "$3" in pressed|released|double|debounce|type_override|btntype|ct_pressed|ct_released|ct_double|svc_pressed|svc_released|svc_double|en_pressed|en_released|en_double) ;; *) echo '{"error":"bad field"}'; exit 0 ;; esac
+	case "$3" in debounce|type_override|btntype) ;; ct_*|svc_*) _is_state "${3#*_}" ;; *) _is_state "$3" ;; esac \
+		|| { echo '{"error":"bad field"}'; exit 0; }
 	_s=$(_sid "$2")
 	uci -q get "$CFG.$_s" >/dev/null 2>&1 || uci -q set "$CFG.$_s=button"
 	uci -q set "$CFG.$_s.name=$2"
@@ -228,7 +231,8 @@ leds)
 	;;
 setleds)
 	[ -n "$2" ] || { echo '{"error":"no button"}'; exit 0; }
-	case "$3" in pressed|released|double|on_pressed|off_pressed|on_released|off_released|on_double|off_double) ;; *) echo '{"error":"bad action"}'; exit 0 ;; esac
+	case "$3" in on_*|off_*) _is_state "${3#*_}" ;; *) _is_state "$3" ;; esac \
+		|| { echo '{"error":"bad action"}'; exit 0; }
 	_s=$(_sid "$2")
 	uci -q get "$CFG.$_s" >/dev/null 2>&1 || uci -q set "$CFG.$_s=button"
 	uci -q set "$CFG.$_s.name=$2"
@@ -257,7 +261,7 @@ applyleds)
 	;;
 run)
 	[ -n "$2" ] || exit 0
-	case "$3" in pressed|released|double) ;; *) exit 0 ;; esac
+	_is_state "$3" && _ext_run "$2" "$3" || exit 0
 	_s=$(_sid "$2")
 	_st="$3"
 	_ct=$(uci -q get "$CFG.$_s.ct_$_st")
@@ -294,14 +298,6 @@ run)
 syncleds)
 	_sync_leds_all
 	;;
-smsmode)
-	# GL-E750 display, Show SMS mode: smsmode <flip|double|long> <page|next|prev|replay|read|exit>
-	case "$2" in flip|double|long) ;; *) echo '{"error":"bad input"}'; exit 0 ;; esac
-	case "$3" in page|next|prev|replay|read|exit) ;; *) echo '{"error":"bad action"}'; exit 0 ;; esac
-	uci -q set "$CFG.sms.mcu_$2=$3"
-	uci -q commit "$CFG"
-	echo '{"ok":1}'
-	;;
 svc)
 	[ -n "$3" ] || { echo "usage: svc <toggle|start|stop|restart> <service>"; exit 1; }
 	[ -x "/etc/init.d/$3" ] || { echo "no such service: $3"; exit 1; }
@@ -316,6 +312,6 @@ svc)
 	esac
 	;;
 *)
-	echo '{"error":"usage: detect|set|run"}'
+	_ext_cmd "$@" || echo '{"error":"usage: detect|set|run"}'
 	;;
 esac
