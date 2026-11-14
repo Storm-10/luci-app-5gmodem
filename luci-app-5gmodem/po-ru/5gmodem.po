@@ -6439,3 +6439,18 @@ msgstr "Выберите VPN или другой канал, если через
 
 msgid "default route"
 msgstr "маршрут по умолчанию"
+
+msgid "Enabling uplink aggregation — the modem reconnects to the network…"
+msgstr "Включаю агрегацию на отдачу — модем заново подключается к сети…"
+
+msgid "Stop turning it on"
+msgstr "Больше не включать"
+
+msgid "Turned on again after every modem restart"
+msgstr "Включается снова после каждого перезапуска модема"
+
+msgid "Upload often sits at 1-2 Mbit/s until this is on. The choice is kept and applied again after a modem restart; the gain depends on the operator."
+msgstr "Без неё отдача часто держится на 1-2 Мбит/с. Выбор запоминается и повторяется после перезапуска модема; прирост зависит от оператора."
+
+msgid "Upload is aggregated too: %s"
+msgstr "Отдача тоже идёт по нескольким несущим: %s"

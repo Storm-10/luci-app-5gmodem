@@ -6154,3 +6154,18 @@ msgstr "Chọn VPN hoặc đường lên khác nếu không truy cập được 
 
 msgid "default route"
 msgstr "tuyến mặc định"
+
+msgid "Enabling uplink aggregation — the modem reconnects to the network…"
+msgstr "Đang bật gộp sóng đường lên — modem kết nối lại mạng…"
+
+msgid "Stop turning it on"
+msgstr "Ngừng tự bật"
+
+msgid "Turned on again after every modem restart"
+msgstr "Được bật lại sau mỗi lần khởi động lại modem"
+
+msgid "Upload often sits at 1-2 Mbit/s until this is on. The choice is kept and applied again after a modem restart; the gain depends on the operator."
+msgstr "Tốc độ tải lên thường chỉ 1-2 Mbit/s khi chưa bật. Lựa chọn được lưu và áp dụng lại sau khi khởi động lại modem; mức cải thiện tùy nhà mạng."
+
+msgid "Upload is aggregated too: %s"
+msgstr "Tải lên cũng được gộp sóng: %s"

@@ -120,7 +120,11 @@ Each returns `Unsupported` to hide the row.
 - `get5gmode` / `set5gmode full`: 5G can be disabled in firmware while bands and cell lock look fine; `sa+nsa` | `sa` | `nsa` | `off`. Applied via the airplane cycle, so in background.
 - `getcaenabled`: carrier aggregation switched off in firmware (module behaves like cat4).
 - `get256qam` / `set256qam 0|1`: only on/off is shown, no promise of speed (forum reports gains only at SINR ~21 dB with eNB support).
-- `getulca` / `setulca on`: uplink CA on DW5821e/T77W968 (1-2 Mbit/s up with rich DL, 55-90 Mbit/s after enabling). No disabling command is known, so only `on` is accepted and the button is shown only when disabled.
+- `getulca` / `setulca on|forget`: uplink CA on DW5821e/T77W968 (1-2 Mbit/s up with rich DL, 55-90 Mbit/s after enabling). No disabling command is known, so only `on` is accepted.
+  - On some firmware `AT^ULCA` does not survive a modem restart. Until 3.9.45 the button ran the generic "after" path, which reboots the modem when the profile has no `_BANDS_APPLY_LIVE`, and that reboot undid it (a field report: the button kept coming back, the modem "rebooted for a long time"). Now `on` writes `save_ulca=1` in the modem section, re-attaches with `AT+CFUN=4`/`1` (the network learns the UE capability at attach) and reconnects the interface, without a reboot.
+  - `restorebands` (hotplug `31-5gmodem-bands`, which now also runs when only `save_ulca` is set) sends `AT^ULCA` again when the modem reports it off, then re-attaches.
+  - `json` gives `ulca_saved: 1`; the page then says it is turned on after every restart and offers "Stop turning it on" (`setulca forget`, removes `save_ulca` only).
+  - Whether the operator grants uplink CA is outside the modem: forum reports range from no change to 55-90 Mbit/s.
 - `getantports`: one `port:rsrp:rsrq` line per antenna port; RSRP around -140 means no antenna.
 - `bandwarn` in json: the profile sets `_BAND_RECONNECT_WARN=1` (FM350) and the page shows a permanent hint that Apply drops the link for ~15-20 s.
 

@@ -526,3 +526,18 @@ msgstr ""
 
 msgid "default route"
 msgstr ""
+
+msgid "Enabling uplink aggregation — the modem reconnects to the network…"
+msgstr ""
+
+msgid "Stop turning it on"
+msgstr ""
+
+msgid "Turned on again after every modem restart"
+msgstr ""
+
+msgid "Upload often sits at 1-2 Mbit/s until this is on. The choice is kept and applied again after a modem restart; the gain depends on the operator."
+msgstr ""
+
+msgid "Upload is aggregated too: %s"
+msgstr ""

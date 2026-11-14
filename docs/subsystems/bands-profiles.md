@@ -71,7 +71,8 @@ One module under 413c:81d7, 413c:81e0 (Dell) and 0489:e0b5/e0b4 (Foxconn); ident
 - Supported list from `AT^SLBAND=?` (`^SLBAND: LTE,(1,2,3,...,66)`), varies by firmware (some lack 12/17/42/43/48); static list only as fallback. The fallback needs 48, otherwise a reset silently disabled it.
 - `_foxconn_common1` parses only the `LTE,Enabled` section; matching `/LTE/` also took `LTE,Disabled,...` and showed disabled bands as enabled.
 - `AT^SLMODE=1,<n>` with its own numbers: 4 Auto, 14 WCDMA, 30 LTE, 35 WCDMA+LTE, 6 LTE+NR (not offered: X20 is LTE Cat.16, no 5G). On T99W175 `1,4` is NR5G only. The answer is `^SLMODE:1,30-LTE Only`, take only the number.
-- `AT^ULCA?` -> `ULCA is enabled/disabled` (sometimes without spaces), match by substring. No disabling form is known.
+- `AT^ULCA?` -> `ULCA is enabled/disabled` (sometimes without spaces), match by substring. No disabling form is known. Lost on a modem restart on some firmware (kept by `save_ulca`, see bands.md).
+- `AT^DEBUG?` SCell blocks: `SNR:-20.0dB` is the firmware's "not measured" (seen next to RSRQ -9.9 dB), dropped by the parser. `AT^DEBUG?` has no SCell state, so telemetry counts a listed SCell as active.
 - AT under ModemManager drops the session on this module (gated in `bands.sh`).
 
 ## Compal RXM-G1 (mmcli)

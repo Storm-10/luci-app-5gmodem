@@ -135,3 +135,16 @@ regression.
 - **T99W373 / MV32-W** (0489:e0f0, 1e2d:00f1-00f4): not verified, set by family. The
   cost is asymmetric: an extra reset costs a minute offline, a missing one looks
   exactly like the complaint that created this entry. -> `1`.
+
+## FM350-GL neighbour rows (`AT+GTCCINFO?`)
+
+Field order per the AT manual (V2.10, 11.1.15): serving LTE row `...,<pci>,<band>,<bandwidth>,<rssnr>,<rxlev>,<rsrp>,<rsrq>`,
+neighbour LTE row `...,<pci>,<bandwidth>,<rxlev>,<rsrp>,<rsrq>`. A field report showed neighbour RSRQ indexes 51-80,
+which turned into +5..+20 dB; the LTE index runs 0..34 (-20..-3 dB) and NR SS-RSRQ 0..127, so values outside are
+dropped (`half()` in `modem/usb/0e8d7127`). The forum also reports junk tails in neighbour rows (PCI above 503,
+EARFCN in no band), already filtered by PCI range.
+
+`AT+GTCAINFO?` SCC rows are `SCCn:<scell_state>,<ul_configured>,<band>,<pci>,<earfcn>,<dl_bw>,<ul_bw>,...`
+(state 2 = activated; `ul_configured` 1 = the upload also runs on this carrier, then `ul_bw` is a real width,
+otherwise 255; forum dumps agree). The parser builds `ULCC` = PCC band + such SCC bands (`B3+B1`), the snapshot
+field `ulcc`; the page adds "UL B3+B1" to the CA badge and telemetry publishes it as `ul_ca`. Other modems leave it empty.
