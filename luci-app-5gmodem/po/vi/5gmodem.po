@@ -6139,3 +6139,18 @@ msgstr "LAC/TAC"
 
 msgid "Switching the mobile-data SIM…"
 msgstr "Đang chuyển SIM dữ liệu di động…"
+
+msgid "Automatic (default route)"
+msgstr "Tự động (tuyến mặc định)"
+
+msgid "Download through"
+msgstr "Tải xuống qua"
+
+msgid "Needs the curl package: without it the download always goes through the default route."
+msgstr "Cần gói curl: nếu không có, việc tải xuống luôn đi qua tuyến mặc định."
+
+msgid "Pick a VPN or another uplink if GitHub is not reachable through the main one. If the download through it fails, the default route is tried."
+msgstr "Chọn VPN hoặc đường lên khác nếu không truy cập được GitHub qua đường chính. Nếu tải qua đó thất bại, sẽ thử tuyến mặc định."
+
+msgid "default route"
+msgstr "tuyến mặc định"

@@ -6139,3 +6139,18 @@ msgstr "LAC/TAC"
 
 msgid "Switching the mobile-data SIM…"
 msgstr "Mengganti SIM data seluler…"
+
+msgid "Automatic (default route)"
+msgstr "Otomatis (rute default)"
+
+msgid "Download through"
+msgstr "Unduh melalui"
+
+msgid "Needs the curl package: without it the download always goes through the default route."
+msgstr "Memerlukan paket curl: tanpanya unduhan selalu melalui rute default."
+
+msgid "Pick a VPN or another uplink if GitHub is not reachable through the main one. If the download through it fails, the default route is tried."
+msgstr "Pilih VPN atau uplink lain jika GitHub tidak dapat dijangkau melalui jalur utama. Jika unduhan melaluinya gagal, rute default dicoba."
+
+msgid "default route"
+msgstr "rute default"

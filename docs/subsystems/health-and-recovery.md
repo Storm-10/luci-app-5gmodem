@@ -84,6 +84,12 @@ Rules:
 - dnsmasq re-reads the file on SIGHUP, so no service restart is needed.
 - DNS is demoted only when there is somewhere to switch to.
 
+### MBIM link without DNS (`mbim_lost_dns`, `mbim_dns_fix`, lib.sh)
+
+`mbim.sh` of OpenWrt 25.12.6 (umbim commit 152b86e6ab) passes the network's DNS servers to `<iface>_4` / `_6` only with `dhcp=1`. `dhcp` defaults to `auto`, so a default MBIM link comes up with an address and a route but no resolver: ping by IP works, names do not resolve, dnsmasq answers REFUSED. 25.12.5 and earlier are not affected; OpenWrt main fixed it in b556a45351 (servers go to the parent with `proto_add_dns_server`).
+
+The app fills the gap only in that exact state: proto `mbim`, `peerdns` not 0, the link up, and no `dns-server` on the interface or its `_4` / `_6` children (a fixed `mbim.sh` or a `dns` option both leave it alone). The servers come from the last `mbim[pid] Setting up` block of netifd's log for that interface; when the log has rotated, from `AT+CGCONTRDP`, taking the context whose address is the link's own (the cdc-wdm node belongs to umbim and is not touched). The answer is cached per connection, keyed by the link address, a negative one too. The block is written as `# Interface <iface>_4`, so `_dns_restore` and `_dns_demote` treat it like netifd's own, and dnsmasq gets SIGHUP. netifd rewrites the file on every interface event, so `enforce` repeats it every round, and the ifup hotplug (`health.sh dnsfix`, runs with the watchdog off too) closes the gap right after connect. Writers are serialised by `flock` on `/tmp/5gmodem/mbimdns.lock` (busybox `flock` has no `-w`).
+
 ### Turning the watchdog off (`_off_cleanup`, `_teardown`)
 
 Turning the watchdog off used to stop the ticks but leave the +1000 penalties and the state files in place, so traffic could stay away forever from a link that had recovered long ago. Now every known link gets its uci metric back (exactly what netifd would do on its next event), and the state directory is deleted. Ladder steps already started are atomic (`ifdown; sleep; ifup` in one subshell) and finish by themselves. The cleanup has to run under the lock. The tick/once prologue reaches it without going through `round`, so it fills the `_HDUMP` snapshot itself. Otherwise `iface_dev` would return empty and the penalties would stay.

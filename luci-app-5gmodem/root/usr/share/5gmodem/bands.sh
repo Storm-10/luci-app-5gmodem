@@ -52,8 +52,32 @@ if [ "$1" = "mmsetbands" ]; then
 		done
 	fi
 	logger -t 5gmodem "bands: applying via MM ($2)"
-	mmcli -m "$3" --set-current-bands="$2" 2>&1
-	_mb_rc=$?
+	# MM can answer success and keep the old list when the modem is re-probing (a reconnect by
+	# the watchdog): read the list back and try once more before reporting success
+	_mb_cb() { mmcli -m "$1" -K 2>/dev/null | sed -n 's/^modem\.generic\.current-bands\.value\[[0-9]*\] *: *//p' | sort -u | tr '\n' ' '; }
+	_mb_want=$(printf '%s' "$2" | tr '|' '\n' | sort -u | tr '\n' ' ')
+	# only "the list did not move" counts as not applied: the modem may drop a band it lacks
+	_mb_old=$(_mb_cb "$3")
+	_mb_try=0
+	while :; do
+		_mb_out=$(mmcli -m "$3" --set-current-bands="$2" 2>&1)
+		_mb_rc=$?
+		[ "$_mb_rc" = 0 ] || break
+		[ "$2" = any ] && break
+		[ -n "$_mb_old" ] && [ "$_mb_old" != "$_mb_want" ] || break
+		sleep 1
+		_mb_cur=$(_mb_cb "$3")
+		[ -n "$_mb_cur" ] && [ "$_mb_cur" = "$_mb_old" ] || break
+		_mb_try=$((_mb_try + 1))
+		if [ "$_mb_try" -gt 1 ]; then
+			logger -t 5gmodem "bands: MM kept the old list after two writes (now: $_mb_cur)"
+			_mb_out="the modem kept its previous bands ($_mb_cur) - try again once it has settled"
+			_mb_rc=3
+			break
+		fi
+		sleep 3
+	done
+	printf '%s\n' "$_mb_out"
 	exec 7>&- 2>/dev/null
 	exit "$_mb_rc"
 fi

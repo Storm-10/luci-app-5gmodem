@@ -511,6 +511,9 @@ if [ -n "$_POLL_AM" ] \
 			_rt_bd=$(printf '%s' "$_rt" | jsonfilter -e '@.band' 2>/dev/null)
 			_rt_ca=$(printf '%s' "$_rt" | jsonfilter -e '@.ca' 2>/dev/null)
 			_rt_tp=$(printf '%s' "$_rt" | jsonfilter -e '@.temp' 2>/dev/null)
+			# per-sensor list from a device running this app; only "name=number" pairs are kept
+			_rt_tps=$(printf '%s' "$_rt" | jsonfilter -e '@.temps' 2>/dev/null | tr ' ' '\n' | grep -E '^[a-z]{1,12}=-?[0-9]{1,3}(\.[0-9])?$' | head -8 | tr '\n' ' ')
+			_rt_tps=${_rt_tps% }
 			_rt_ml=$(printf '%s' "$_rt" | jsonfilter -e '@.model' 2>/dev/null | tr -d '"\\')
 			_rt_ph=$(printf '%s' "$_rt" | jsonfilter -e '@.phone' 2>/dev/null | tr -cd '+0-9')
 			_rt_pr=dhcp
@@ -541,13 +544,13 @@ if [ -n "$_POLL_AM" ] \
 				[ -n "$_rt_x" ] && { _rt_rx="${_rt_x%%|*}"; _rt_tx="${_rt_x##*|}"; }
 			fi
 			_rt_tmp="$CACHE.r$$"
-			printf '{"backend":"router","protocol":"%s","iface_proto":"%s","path":"%s","vidpid":"%s:%s","modem":"%s","operator_name":"%s","registration":"1","mode":"%s","pband":"%s","signal":"%s","rsrp":"%s","rsrq":"%s","sinr":"%s","mtemp":"%s","phone":"%s","conn_time":"%s","conn_time_sec":"%s","conn_time_since":"%s","rx":"%s","tx":"%s","iface":"%s","ipaddr":"%s","tether":"router","tether_state":"ready","gateway":"%s","netdev":"%s"}\n' \
+			printf '{"backend":"router","protocol":"%s","iface_proto":"%s","path":"%s","vidpid":"%s:%s","modem":"%s","operator_name":"%s","registration":"1","mode":"%s","pband":"%s","signal":"%s","rsrp":"%s","rsrq":"%s","sinr":"%s","mtemp":"%s","temps":"%s","phone":"%s","conn_time":"%s","conn_time_sec":"%s","conn_time_since":"%s","rx":"%s","tx":"%s","iface":"%s","ipaddr":"%s","tether":"router","tether_state":"ready","gateway":"%s","netdev":"%s"}\n' \
 				"$_rt_pr" "$_rt_pr" "$_POLL_AM" "$(cat "/sys/bus/usb/devices/$_POLL_AM/idVendor" 2>/dev/null)" "$(cat "/sys/bus/usb/devices/$_POLL_AM/idProduct" 2>/dev/null)" \
 				"${_rt_ml:-$_tj_nm}" "$(printf '%s' "$_rt_op" | tr -d '"\\')" "$_rt_md" "${_rt_bd:--}" \
 				"$(printf '%s' "$_rt" | jsonfilter -e '@.sig' 2>/dev/null)" "$_rt_rsrp" \
 				"$(printf '%s' "$_rt" | jsonfilter -e '@.rsrq' 2>/dev/null)" \
 				"$(printf '%s' "$_rt" | jsonfilter -e '@.sinr' 2>/dev/null)" \
-				"${_rt_tp:+$_rt_tp &deg;C}" "${_rt_ph:--}" "$_rt_cts" "$_rt_cto" "$_rt_ctsn" "$_rt_rx" "$_rt_tx" "$_tj_if" "${_tj_ip:--}" "$_tj_gw" "$_tj_nd" > "$_rt_tmp"
+				"${_rt_tp:+$_rt_tp &deg;C}" "${_rt_tps:--}" "${_rt_ph:--}" "$_rt_cts" "$_rt_cto" "$_rt_ctsn" "$_rt_rx" "$_rt_tx" "$_tj_if" "${_tj_ip:--}" "$_tj_gw" "$_tj_nd" > "$_rt_tmp"
 			cat "$_rt_tmp"
 			if jsonfilter -i "$_rt_tmp" -e '@.modem' >/dev/null 2>&1; then
 				mv "$_rt_tmp" "$CACHE" && uptime_s > "$STAMP"

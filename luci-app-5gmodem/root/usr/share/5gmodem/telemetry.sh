@@ -70,6 +70,8 @@ tele_write() {
 	_num sinr "$(_int "$(_jf sinr)")"
 	_num temp "$(_int "$(_jf mtemp | sed 's/ *&deg;C//')")"
 	_num therm "$(_int "$(_jf mtherm)")"
+	# per-sensor readings ("cpu=48.2 pa=41.0"), so a host that reads this device over the network can list them too
+	_str temps "$(_jf temps | sed 's/^-$//')"
 	_num bat  "$(_int "$(_jf battery)")"
 	_num chg  "$(_int "$(_jf battery_charging)")"
 	_num dist "$(_int "$(_jf bs_distance)")"

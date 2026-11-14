@@ -144,6 +144,11 @@ some do not", broken inbound. Diagnosis used to go into DNS/MTU/TTL. A LAN on 19
 - Multi-modem routers: `resolv.conf.auto` lists resolvers of all carriers. A query to a foreign
   resolver leaves through another uplink's default and is dropped: resolving works every other time.
   netifd writes `# Interface <name>` above each group, which is how ownership is attributed.
+- An `mbim` interface that is up with no DNS servers at all is named as the OpenWrt 25.12.6 `mbim.sh`
+  bug (see health-and-recovery.md), with the servers the modem reported and a manual workaround;
+  when the app has already filled them in, the report says so. The short verdict adds the cause.
+- dnsmasq logs "DNS rebinding protection is active" at every start; that line is not a block and is
+  no longer reported as one.
 - Servers from the interface `dns` option ("Fallback DNS") that do not answer are flagged: under a
   carrier whitelist 8.8.8.8/1.1.1.1 are blocked and dnsmasq keeps using them; 77.88.8.8/77.88.8.1
   are suggested.
