@@ -31,9 +31,10 @@ qmi_pool_exhausted() {
 _mm_failed_unknowncaps() {
 	command -v mmcli >/dev/null 2>&1 || return 1
 	for _i in $(mmcli -L 2>/dev/null | grep -oE '/Modem/[0-9]+' | grep -oE '[0-9]+$'); do
-		_d=$(mmcli -m "$_i" -K 2>/dev/null | sed -n 's/^modem\.generic\.device *: *//p')
+		_k=$(mmcli -m "$_i" -K 2>/dev/null)
+		_d=$(printf '%s\n' "$_k" | sed -n 's/^modem\.generic\.device *: *//p')
 		case "$_d" in *"$1") ;; *) continue ;; esac
-		[ "$(mmcli -m "$_i" -K 2>/dev/null | sed -n 's/^modem\.generic\.state-failed-reason *: *//p')" \
+		[ "$(printf '%s\n' "$_k" | sed -n 's/^modem\.generic\.state-failed-reason *: *//p')" \
 			= "unknown-capabilities" ] && return 0
 		return 1
 	done
@@ -56,7 +57,8 @@ qmi_pool_recover() {
 	_qr_recent "$_mk" && return 1
 	for _t in $(printf '%s' "$_lm" | jsonfilter -e "@[@.path=\"$_qp\"].tty[*]" 2>/dev/null); do
 		[ -e "$_t" ] || continue
-		at_query "$_t" "AT" 5 | grep -q "OK" || continue
+		# AT_QUERY_RAW: plain sms_tool output has no OK line, so no port ever passed this check
+		AT_QUERY_RAW=1 at_query "$_t" "AT" 5 | tr -d '\r' | grep -q '^OK' || continue
 		logger -t 5gmodem "$_trig on $_qp - resetting the modem (AT+CFUN=1,1 on $_t)"
 		cut -d. -f1 /proc/uptime > "$_mk" 2>/dev/null
 		at_query "$_t" "AT+CFUN=1,1" 5 >/dev/null 2>&1
@@ -73,7 +75,8 @@ qmi_force_reset() {
 	_lm=$("$RES/listmodems.sh" 2>/dev/null)
 	for _t in $(printf '%s' "$_lm" | jsonfilter -e "@[@.path=\"$_fr_p\"].tty[*]" 2>/dev/null); do
 		[ -e "$_t" ] || continue
-		at_query "$_t" "AT" 5 | grep -q "OK" || continue
+		# AT_QUERY_RAW: plain sms_tool output has no OK line, so no port ever passed this check
+		AT_QUERY_RAW=1 at_query "$_t" "AT" 5 | tr -d '\r' | grep -q '^OK' || continue
 		logger -t 5gmodem "${2:-reset needed} on $_fr_p - resetting the modem (AT+CFUN=1,1 on $_t)"
 		cut -d. -f1 /proc/uptime > "$_mk" 2>/dev/null
 		at_query "$_t" "AT+CFUN=1,1" 5 >/dev/null 2>&1

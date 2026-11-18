@@ -80,7 +80,8 @@ _fibocom_auth() {
 			out=$(sms_tool -d "$dial" at "AT+XGAUTH=1,$am,\"$username\",\"$password\"" 2>&1)
 		fi
 		case "$out" in
-			*ERROR*) echo "fibocom[$$] AT+XGAUTH rejected, trying AT+CGAUTH" ;;
+			# stderr: this runs inside ip=$(_fibocom_activate ...), stdout is the address
+			*ERROR*) echo "fibocom[$$] AT+XGAUTH rejected, trying AT+CGAUTH" >&2 ;;
 			*) out="" ;;
 		esac
 	fi
@@ -94,6 +95,74 @@ _fibocom_auth() {
 	[ -n "$interface" ] && [ -n "$usbpath" ] && \
 		cat "/sys/bus/usb/devices/$usbpath/devnum" 2>/dev/null \
 			> "/tmp/5gmodem/fibocom_authed_$interface" 2>/dev/null
+}
+
+# IPv6 of a dual-stack context: a dhcpv6 child interface on the same netdev (RA + DHCPv6)
+_fibocom_v6() {
+	local interface="$1" ctx_pdp="$2" sourcefilter="$3" zone6
+	case "$ctx_pdp" in
+		*[vV]6*) ;;
+		*) return 0 ;;
+	esac
+	zone6=$(_fibocom_fwzone "$interface")
+	json_init
+	json_add_string name "${interface}_6"
+	json_add_string ifname "@$interface"
+	json_add_string proto "dhcpv6"
+	json_add_string extendprefix 1
+	[ "$sourcefilter" = "0" ] && json_add_boolean sourcefilter "0"
+	proto_add_dynamic_defaults
+	[ -n "$zone6" ] && json_add_string zone "$zone6"
+	json_close_object
+	ubus call network add_dynamic "$(json_dump)"
+	echo "fibocom[$$] IPv6 ($ctx_pdp): brought up dhcpv6 interface ${interface}_6 (zone ${zone6:--})"
+}
+
+# Unisoc-based Fibocom modules (2cb7:0a04-0a07) in ECM/NCM/RNDIS mode: the module is a small
+# router of its own. The data call on the host port is made with AT+GTRNDIS and the address comes
+# from the module's DHCP server (a dhcp child interface <iface>_4 renews the lease and takes a
+# new address); the operator address from +CGPADDR does not work on the netdev.
+# See docs/modems/fibocom.md#unisoc-modules-gtrndis.
+_uni_state() {
+	sms_tool -d "$1" at "AT+GTRNDIS?" 2>/dev/null | tr -d '\r' \
+		| sed -n 's/^+GTRNDIS: *\([0-9]\).*/\1/p' | head -1
+}
+
+_uni_dial() {
+	local dial="$1" pdptype="$2" apn="$3" cold="$4" ippass="$5" try cur_apn cur_pass
+	cur_apn=$(sms_tool -d "$dial" at "AT+CGDCONT?" 2>/dev/null | tr -d '\r' \
+		| sed -n 's/^+CGDCONT: *1,"[^"]*","\([^"]*\)".*/\1/p' | head -1)
+	[ "$cur_apn" = "$apn" ] || cold=1
+	# bridge (IP pass-through): stored in the module, takes effect on the next data call
+	case "$ippass" in
+		0|1)
+			cur_pass=$(sms_tool -d "$dial" at "AT+GTIPPASS?" 2>/dev/null | tr -d '\r' \
+				| sed -n 's/^+GTIPPASS: *\([0-9]\).*/\1/p' | head -1)
+			if [ -n "$cur_pass" ] && [ "$cur_pass" != "$ippass" ]; then
+				echo "fibocom[$$] Unisoc: IP pass-through $cur_pass -> $ippass"
+				sms_tool -d "$dial" at "AT+GTRNDIS=0,1" >/dev/null 2>&1
+				sms_tool -d "$dial" at "AT+GTIPPASS=$ippass" >/dev/null 2>&1
+				cold=1
+			elif [ -z "$cur_pass" ] && [ "$ippass" = 1 ]; then
+				echo "fibocom[$$] Unisoc: the module does not answer AT+GTIPPASS? - bridge mode is not available"
+			fi ;;
+	esac
+	if [ "$cold" = 1 ] || [ "$(_uni_state "$dial")" != 1 ]; then
+		sms_tool -d "$dial" at "AT+GTRNDIS=0,1" >/dev/null 2>&1
+		sleep 1
+		sms_tool -d "$dial" at "AT+CGDCONT=1,\"$pdptype\",\"$apn\"" >/dev/null 2>&1
+		_fibocom_auth "$dial"
+		sms_tool -d "$dial" at "AT+GTRNDIS=1,1" >/dev/null 2>&1
+		for try in 1 2 3 4 5 6 7 8 9 10; do
+			[ "$(_uni_state "$dial")" = 1 ] && break
+			sleep 2
+		done
+		if [ "$(_uni_state "$dial")" != 1 ]; then
+			echo "fibocom[$$] Unisoc: AT+GTRNDIS=1,1 did not bring the data call up"
+			return 1
+		fi
+	fi
+	return 0
 }
 
 _fibocom_activate() {
@@ -262,6 +331,7 @@ proto_fibocom_init_config() {
 	proto_config_add_int "metric"
 	proto_config_add_boolean "allow_roaming"
 	proto_config_add_boolean "sourcefilter"
+	proto_config_add_string "ippass"
 	proto_config_add_defaults
 }
 
@@ -274,8 +344,8 @@ proto_fibocom_setup() {
 		proto_block_restart "$interface"
 		return 1
 	fi
-	local usbpath modem_path device atport apn pdptype metric sourcefilter
-	json_get_vars usbpath modem_path device atport apn pdptype metric allow_roaming auth username password sourcefilter
+	local usbpath modem_path device atport apn pdptype metric sourcefilter ippass
+	json_get_vars usbpath modem_path device atport apn pdptype metric allow_roaming auth username password sourcefilter ippass
 
 	[ -n "$apn" ] || apn="internet"
 	[ -n "$pdptype" ] || pdptype="IPV4"
@@ -332,6 +402,11 @@ proto_fibocom_setup() {
 	local IS_R11E=0
 	[ "$(cat "/sys/bus/usb/devices/$usbpath/idVendor" 2>/dev/null):$(cat "/sys/bus/usb/devices/$usbpath/idProduct" 2>/dev/null)" = "2cd2:0001" ] && IS_R11E=1
 
+	local IS_UNI=0
+	case "$(cat "/sys/bus/usb/devices/$usbpath/idVendor" 2>/dev/null):$(cat "/sys/bus/usb/devices/$usbpath/idProduct" 2>/dev/null)" in
+		2cb7:0a04|2cb7:0a05|2cb7:0a06|2cb7:0a07) IS_UNI=1 ;;
+	esac
+
 	local dial="$atport"
 	if [ -z "$dial" ] && [ -n "$usbpath" ]; then
 		local own_at
@@ -344,6 +419,15 @@ proto_fibocom_setup() {
 		proto_notify_error "$interface" NO_AT_PORT
 		sleep 10
 		return 1
+	fi
+
+	if [ -x /usr/share/5gmodem/simwait.sh ]; then
+		local sim_section="m_$(printf '%s' "$usbpath" | sed 's/[^A-Za-z0-9]/_/g')"
+		if ! /usr/share/5gmodem/simwait.sh check "$interface" "$sim_section" "$usbpath" "$dial"; then
+			proto_notify_error "$interface" SIM_MISSING
+			proto_block_restart "$interface"
+			return 1
+		fi
 	fi
 
 	_fib_lock_held=""
@@ -365,6 +449,12 @@ proto_fibocom_setup() {
 	[ "$IS_R11E" = 1 ] && _r11e_prepare "$dial" "$pdptype" "$apn" "$interface"
 	local _reg="" _rw=0 _kick=0
 	while :; do
+		if [ -f "/tmp/5gmodem/simwait/$interface" ] && /usr/share/5gmodem/simwait.sh blocked "$interface"; then
+			_fib_unlock
+			proto_notify_error "$interface" SIM_MISSING
+			proto_block_restart "$interface"
+			return 1
+		fi
 		_reg=$(_fibocom_reg "$dial")
 		case "$_reg" in 1|5|6|7|9|10) break ;; esac
 		if [ "$_kick" = 0 ] && [ "$(_fibocom_cops_mode "$dial")" = 2 ]; then
@@ -469,7 +559,40 @@ proto_fibocom_setup() {
 			echo "fibocom[$$] R11e-LTE: the network brought up no data context (AT+CGACT? has none active)"
 		fi
 	fi
-	if [ "$IS_R11E" != 1 ] && [ "$bands_changed" = "0" ] && sms_tool -d "$dial" at "AT+CGACT?" 2>/dev/null | tr -d '\r' | grep -qE '^\+CGACT: *1,1'; then
+	if [ "$IS_UNI" = 1 ]; then
+		if ! _uni_dial "$dial" "$pdptype" "$apn" "$bands_changed" "$ippass"; then
+			_fib_unlock
+			proto_notify_error "$interface" NO_DATA_CALL
+			sleep 10
+			return 1
+		fi
+		[ -n "$net_plmn" ] && printf '%s' "$net_plmn" > "$net_f" 2>/dev/null
+		local uni_ctx
+		uni_ctx=$(sms_tool -d "$dial" at "AT+CGDCONT?" 2>/dev/null | tr -d '\r' \
+			| sed -n 's/^+CGDCONT: *1,"\([^"]*\)".*/\1/p' | head -1)
+		_fib_unlock
+		ip link set "$netdev" up 2>/dev/null
+		echo "fibocom[$$] Unisoc: data call up (AT+GTRNDIS), taking the address from the module over DHCP on $netdev"
+		# This proto has no device of its own (no_device=1), so netifd rejects a DHCP update
+		# without an ifname (the stock dhcp.script sends "*"): hand the netdev to netifd first,
+		# then a dhcp child interface takes the module's lease and follows renewals.
+		proto_init_update "$netdev" 1
+		proto_send_update "$interface"
+		local zone4
+		zone4=$(_fibocom_fwzone "$interface")
+		json_init
+		json_add_string name "${interface}_4"
+		json_add_string ifname "@$interface"
+		json_add_string proto "dhcp"
+		proto_add_dynamic_defaults
+		[ -n "$zone4" ] && json_add_string zone "$zone4"
+		json_close_object
+		ubus call network add_dynamic "$(json_dump)"
+		# dual stack: the module announces the IPv6 prefix on the same netdev
+		_fibocom_v6 "$interface" "$uni_ctx" "$sourcefilter"
+		return 0
+	fi
+	if [ "$IS_R11E" != 1 ] && [ "$IS_UNI" != 1 ] && [ "$bands_changed" = "0" ] && sms_tool -d "$dial" at "AT+CGACT?" 2>/dev/null | tr -d '\r' | grep -qE '^\+CGACT: *1,1'; then
 		local cur_ctx cur_apn cur_pdp
 		cur_ctx=$(sms_tool -d "$dial" at "AT+CGDCONT?" 2>/dev/null | tr -d '\r' \
 			| grep '^+CGDCONT: *1,' | head -1)
@@ -494,7 +617,7 @@ proto_fibocom_setup() {
 		fi
 	fi
 
-	if [ -z "$ip" ] && [ "$IS_R11E" != 1 ]; then
+	if [ -z "$ip" ] && [ "$IS_R11E" != 1 ] && [ "$IS_UNI" != 1 ]; then
 		ip=$(_fibocom_activate "$dial" "$pdptype" "$apn")
 		if [ -z "$ip" ]; then
 			local alt="IPV4V6"; [ "$pdptype" = "IPV4V6" ] && alt="IP"
@@ -547,25 +670,9 @@ proto_fibocom_setup() {
 	_fib_unlock
 	proto_send_update "$interface"
 
-	case "$ctx_pdp" in
-		*[vV]6*)
-			local zone6
-			zone6=$(_fibocom_fwzone "$interface")
-			json_init
-			json_add_string name "${interface}_6"
-			json_add_string ifname "@$interface"
-			json_add_string proto "dhcpv6"
-			json_add_string extendprefix 1
-			[ "$sourcefilter" = "0" ] && json_add_boolean sourcefilter "0"
-			proto_add_dynamic_defaults
-			[ -n "$zone6" ] && json_add_string zone "$zone6"
-			json_close_object
-			ubus call network add_dynamic "$(json_dump)"
-			echo "fibocom[$$] IPv6 ($ctx_pdp): brought up dhcpv6 interface ${interface}_6 (zone ${zone6:--})"
-			;;
-	esac
+	_fibocom_v6 "$interface" "$ctx_pdp" "$sourcefilter"
 
-	if [ "$IS_R11E" != 1 ] && [ "$(uci -q get "network.$interface.ipwatch")" = 1 ]; then
+	if [ "$IS_R11E" != 1 ] && [ "$IS_UNI" != 1 ] && [ "$(uci -q get "network.$interface.ipwatch")" = 1 ]; then
 		echo "fibocom[$$] following network address changes on $dial"
 		proto_run_command "$interface" /usr/share/5gmodem/fiboipwatch.sh \
 			"$interface" "$dial" "$ip" "$(uci -q get "network.$interface.ipwatch_interval")"

@@ -268,6 +268,9 @@ round() {
 	ucinet_snapshot
 	uptime_s > "$HDIR/.t"
 	_HDUMP=$(ubus call network.interface dump 2>/dev/null)
+	# fill the cache in this shell: $(wan_nets) runs in a subshell and loses it,
+	# so the probe loop and the ghost cleanup below each re-ran the route scan
+	wan_nets >/dev/null
 	for _r_n in $(wan_nets); do
 		case "$_r_n" in
 			*6) _r_p=$(ucinet_get "$_r_n" proto)
@@ -433,6 +436,9 @@ _dns_restore() {
 }
 
 enforce() {
+	# re-read metrics: netpri set/order may have committed new ones while the
+	# probes ran, and the round's snapshot would move the routes back
+	ucinet_snapshot
 	_e_anyup=""; _e_cnt=0; _e_min=""; _e_dead=""
 	for _e_f in "$HDIR"/*; do
 		[ -f "$_e_f" ] || continue; case "$_e_f" in */.t|*.heal|*.demoted|*.nosim|*.nodata|*.mmoff|*.on2g|*.srch|*.radio|*.mmbusy|*.noproto) continue ;; esac
@@ -446,6 +452,7 @@ enforce() {
 		[ -f "$_e_f" ] || continue; case "$_e_f" in */.t|*.heal|*.demoted|*.nosim|*.nodata|*.mmoff|*.on2g|*.srch|*.radio|*.mmbusy|*.noproto) continue ;; esac
 		_e_if="${_e_f##*/}"
 		read -r _e_st _ _ _ _ < "$_e_f" || continue
+		mbim_dns_fix "$_e_if"
 		_e_dev=$(iface_dev "$_e_if"); [ -n "$_e_dev" ] || _e_dev=$(iface_dev "${_e_if}_4")
 		[ -n "$_e_dev" ] || continue
 		_e_base=$(base_metric "$_e_if")
@@ -519,32 +526,6 @@ mm_registered_now() {
 		| sed -n 's/^modem\.generic\.state *: *//p' | head -1)" = registered ]
 }
 
-sim_absent() {
-	if [ "$(uci -q get "$CFG.$1.kind")" = "hilink" ]; then
-		_sa_ss=$("$RES/hilink.sh" json "$2" 2>/dev/null \
-			| jsonfilter -e '@.sim_status' 2>/dev/null)
-		case "$_sa_ss" in 0|255) return 0 ;; esac
-		return 1
-	fi
-	_sa_idx=$("$RES/modemswitch.sh" mmindex "$2" 2>/dev/null)
-	if [ -n "$_sa_idx" ] && command -v mmcli >/dev/null 2>&1; then
-		mmcli -m "$_sa_idx" -K 2>/dev/null \
-			| grep -q "state-failed-reason *: *sim-missing" && return 0
-		return 1
-	fi
-	_sa_at=$(uci -q get "$CFG.$1.at_port")
-	[ -n "$_sa_at" ] && [ -e "$_sa_at" ] || return 1
-	case "$(readlink -f "/sys/class/tty/${_sa_at##*/}/device" 2>/dev/null)" in
-		*"/$2:"*) ;;
-		*) return 1 ;;
-	esac
-	_sa_o=$(at_query "$_sa_at" "AT+CPIN?" 3 2>/dev/null | tr -d '\r')
-	case "$_sa_o" in
-		*"not inserted"*|*"SIM_ABSENT"*) return 0 ;;
-	esac
-	printf '%s\n' "$_sa_o" | grep -qx '+CME ERROR: 10' && return 0
-	return 1
-}
 
 heal() {
 	[ "$H_HEAL" = "1" ] || [ "$H_HEALWIFI" = "1" ] || return 0
@@ -685,6 +666,12 @@ heal() {
 		[ "$H_HEAL" = "1" ] || continue
 		_h_auto=$(printf '%s' "$_HDUMP" | jsonfilter \
 			-e "@.interface[@.interface=\"$_h_if\"].autostart" 2>/dev/null)
+		if [ -z "$_h_auto" ]; then
+			# not in the netifd dump at all (a disabled interface is not listed): the user
+			# switched it off, healing must not bring it back
+			[ "$(uci -q get "network.$_h_if.auto")" = "0" ] && continue
+			[ "$(uci -q get "network.$_h_if.disabled")" = "1" ] && continue
+		fi
 		if [ "$_h_auto" = "false" ]; then
 			[ "$(uci -q get "network.$_h_if.auto")" = "0" ] && continue
 			[ "$(uci -q get "network.$_h_if.disabled")" = "1" ] && continue
@@ -709,6 +696,12 @@ heal() {
 			[ "$_h_cap" -ge 3 ] && [ "$_h_st" = gone ] || continue
 			_h_absent=1
 		fi
+		if [ -z "$_h_absent" ] && [ -x "$RES/simwait.sh" ]; then
+			if [ -f "/tmp/5gmodem/simwait/$_h_if.resume" ] && "$RES/simwait.sh" recovering "$_h_if"; then continue; fi
+			_h_simowner=""
+			[ "$(uci -q get "network.$_h_if.proto")" = modemmanager ] && _h_simowner=mm
+			"$RES/simwait.sh" check "$_h_if" "$_h_sec" "$_h_path" "$(uci -q get "5gmodem.$_h_sec.at_port")" "$_h_simowner" || continue
+		fi
 		_h_step=0; _h_last=0; _h_n=0
 		[ -f "$HDIR/$_h_if.heal" ] && read -r _h_step _h_last _h_n < "$HDIR/$_h_if.heal"
 		case "$_h_step" in ''|*[!0-9]*) _h_step=0 ;; esac
@@ -719,14 +712,6 @@ heal() {
 		if [ "$_h_st" != gone ] || { [ "$_h_last" != 0 ] && [ -z "$_h_regnow" ]; }; then
 			[ $((_h_now - _h_last)) -ge "$HEAL_COOLDOWN" ] || continue
 		fi
-		if [ -z "$_h_absent" ] && sim_absent "$_h_sec" "$_h_path"; then
-			if [ ! -f "$HDIR/$_h_if.nosim" ]; then
-				: > "$HDIR/$_h_if.nosim"
-				_ev "healing $_h_if: no SIM inserted - healing postponed"
-			fi
-			continue
-		fi
-		rm -f "$HDIR/$_h_if.nosim"
 		_h_pr=$(uci -q get "network.$_h_if.proto")
 		case "$_h_pr" in
 			''|static|none) ;;
@@ -821,7 +806,7 @@ heal() {
 						fi
 						if ! pgrep -f "mmcli -m $_h_mmi --enable" >/dev/null 2>&1; then
 							( mmcli -m "$_h_mmi" --enable >/dev/null 2>&1 & _h_mep=$!
-							  ( sleep 30; kill "$_h_mep" 2>/dev/null ) >/dev/null 2>&1 & _h_mew=$!
+							  ( sleep 30 & _ws=$!; trap 'kill $_ws 2>/dev/null; exit' TERM; wait $_ws; kill "$_h_mep" 2>/dev/null ) >/dev/null 2>&1 & _h_mew=$!
 							  wait "$_h_mep" 2>/dev/null
 							  kill "$_h_mew" 2>/dev/null ) >/dev/null 2>&1 </dev/null 9>&- &
 						fi
@@ -1074,10 +1059,23 @@ event)
 	[ "$H_EN" = "1" ] || exit 0
 	case " $(wan_nets) " in *" $2 "*) ;; *) exit 0 ;; esac
 	mkdir -p "$HDIR"
+	_ev_t0=$(uptime_s)
 	exec 9>"/tmp/5gmodem/health.lock"
 	flock 9
+	# a hotplug burst queues one event per interface; a round that started
+	# after this event already saw it, and every extra round counts one more
+	# probe toward fail_n
+	_ev_t=$(cat "$HDIR/.t" 2>/dev/null)
+	case "$_ev_t" in ''|*[!0-9]*) _ev_t=0 ;; esac
+	[ "$_ev_t" -gt "$_ev_t0" ] && exit 0
 	round
 	enforce
+	;;
+dnsfix)
+	# works with the watchdog off too: without it nobody else gives an MBIM link its DNS back
+	_df_if="${2%_[46]}"
+	[ -n "$_df_if" ] && mbim_dns_fix "$_df_if"
+	exit 0
 	;;
 getconf)
 	_gc_heal=""
@@ -1086,8 +1084,12 @@ getconf)
 		[ -n "$(uci -q get "$CFG.$_gc_s.path")" ] || continue
 		_gc_heal="$_gc_heal,\"$_gc_n\":\"$(uci -q get "$CFG.$_gc_s.heal")\""
 	done
-	printf '{"enabled":%s,"interval":%s,"targets":"%s","fail_n":%s,"ok_n":%s,"failover":%s,"failback":"%s","healing":%s,"heal_wifi":%s,"sta_park":%s,"manual":"%s","proxy_guard":%s,"lock_release":%s,"power_script":"%s","heal":{%s}}\n' \
-		"${H_EN:-0}" "$H_INT" "$H_TGT" "$H_FAILN" "$H_OKN" "${H_FO:-0}" "$H_FB" "${H_HEAL:-0}" "${H_HEALWIFI:-0}" "$H_STAPARK" "$H_MAN" "$H_PG" "$H_LR" "$H_PSCRIPT" "${_gc_heal#,}"
+	# the stored value, not H_EN: with the "Internet priority" tile hidden H_EN is forced to 0,
+	# and the settings form (which saves everything it shows) used to write that 0 back for good
+	_gc_en=$(conf enabled); [ "$_gc_en" = 1 ] || _gc_en=0
+	_gc_sup=0; [ "$(uci -q get "$CFG.@5gmodem[0].widget_netpri")" = "0" ] && _gc_sup=1
+	printf '{"enabled":%s,"suppressed":%s,"interval":%s,"targets":"%s","fail_n":%s,"ok_n":%s,"failover":%s,"failback":"%s","healing":%s,"heal_wifi":%s,"sta_park":%s,"manual":"%s","proxy_guard":%s,"lock_release":%s,"power_script":"%s","heal":{%s}}\n' \
+		"$_gc_en" "$_gc_sup" "$H_INT" "$H_TGT" "$H_FAILN" "$H_OKN" "${H_FO:-0}" "$H_FB" "${H_HEAL:-0}" "${H_HEALWIFI:-0}" "$H_STAPARK" "$H_MAN" "$H_PG" "$H_LR" "$H_PSCRIPT" "${_gc_heal#,}"
 	;;
 setheal)
 	case "$3" in ''|none|ifup|reboot|power) ;; *) echo '{"error":"bad level"}'; exit 1 ;; esac
@@ -1106,7 +1108,22 @@ setconf)
 	for _sc in "$@"; do
 		_sc_k="${_sc%%=*}"; _sc_v="${_sc#*=}"
 		case "$_sc_k" in
-			enabled|interval|targets|fail_n|ok_n|failover|failback|healing|heal_wifi|sta_park|heal_cooldown|manual|proxy_guard|lock_release) uci -q set "$CFG.health.$_sc_k=$_sc_v" ;;
+			# each value is checked: getconf prints them as raw JSON, and targets end up as ping arguments
+			enabled|failover|healing|heal_wifi|sta_park|proxy_guard|lock_release)
+				case "$_sc_v" in 0|1) uci -q set "$CFG.health.$_sc_k=$_sc_v" ;; *) echo '{"error":"bad value"}'; exit 1 ;; esac ;;
+			interval|fail_n|ok_n|heal_cooldown)
+				case "$_sc_v" in ''|*[!0-9]*) echo '{"error":"bad value"}'; exit 1 ;; esac
+				uci -q set "$CFG.health.$_sc_k=$_sc_v" ;;
+			failback)
+				case "$_sc_v" in demote|restore|'') uci -q set "$CFG.health.$_sc_k=$_sc_v" ;; *) echo '{"error":"bad value"}'; exit 1 ;; esac ;;
+			targets)
+				# hosts and addresses separated by spaces; none may start with "-" (a ping option)
+				case " $_sc_v" in *[!A-Za-z0-9.:\ _-]*|*" -"*) echo '{"error":"bad targets"}'; exit 1 ;; esac
+				uci -q set "$CFG.health.$_sc_k=$_sc_v" ;;
+			manual)
+				# interface names separated by spaces
+				case "$_sc_v" in *[!A-Za-z0-9.\ _-]*) echo '{"error":"bad value"}'; exit 1 ;; esac
+				uci -q set "$CFG.health.$_sc_k=$_sc_v" ;;
 			power_script)
 				case "$_sc_v" in
 					'') uci -q delete "$CFG.health.power_script" ;;
@@ -1120,7 +1137,7 @@ setconf)
 	echo '{"result":"ok"}'
 	;;
 *)
-	echo "usage: $0 tick|once|status|getconf|setconf k=v...|setheal <iface> <none|ifup|reboot|power|>" >&2
+	echo "usage: $0 tick|once|status|dnsfix <iface>|getconf|setconf k=v...|setheal <iface> <none|ifup|reboot|power|>" >&2
 	exit 1
 	;;
 esac

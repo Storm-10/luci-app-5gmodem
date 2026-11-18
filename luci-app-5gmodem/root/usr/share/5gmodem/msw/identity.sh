@@ -121,7 +121,7 @@ swap_cleanup() {
 	for o in at_port data_at_port network iface_proto imei serial celllock kind netdev \
 	         mm_exclude ussd_3g heal slot_type_0 slot_type_1 slot_type_2 \
 	         model_vp apn_plmn apn_imsi band_full save_band save_band5gnsa save_band5gsa save_mode \
-	         no_at mm_at mm_at_if mm_at_vp at_if ident_probe tether hl_api mtk_bandcap web_pass web_user \
+	         no_at mm_at mm_at_if mm_at_vp at_if ident_probe tether hl_api mtk_bandcap web_pass web_pass_empty web_user \
 	         want_proto at_debug netsel netsel_plmn netsel_fb netsel_act android_caps android_caps_for; do
 		uci -q delete "$CFG.$2.$o" 2>/dev/null
 	done
@@ -159,9 +159,10 @@ modem_imei() {
 	fi
 	_mi_nc="/tmp/5gmodem/imei_none_$(snap_key "$1")"
 	_mi_now=$(uptime_s)
-	_mi_ttys=$("$RES/listmodems.sh" 2>/dev/null \
-		| jsonfilter -e "@[@.path=\"$1\"].tty[*]" 2>/dev/null | tr '\n' ' ')
 	if [ -f "$_mi_nc" ]; then
+		# The port list only matters for comparing with a negative cache entry.
+		_mi_ttys=$("$RES/listmodems.sh" 2>/dev/null \
+			| jsonfilter -e "@[@.path=\"$1\"].tty[*]" 2>/dev/null | tr '\n' ' ')
 		read -r _mi_ot _mi_op 2>/dev/null < "$_mi_nc"
 		case "$_mi_ot" in ''|*[!0-9]*) _mi_ot=0 ;; esac
 		if [ "$_mi_op" = "${_mi_ttys% }" ] \

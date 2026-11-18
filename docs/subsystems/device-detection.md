@@ -943,6 +943,16 @@ runtime (`/configs`, open the port with PATCH; listens on 127.0.0.1 only). Used
 for the app updater and the APN database. `curl -x` handles CONNECT for https;
 without curl, wget with proxy env vars. tgnotify still has its own copy.
 
+A device picked in Settings → Application update → "Download through"
+(`5gmodem.@5gmodem[0].fetch_dev`) goes before all of this: `curl --interface
+<dev> --connect-timeout 8`. It covers a second uplink that is not a tunnel (the
+automatic ladder below only takes type-65534 devices), for a field report where
+the carrier blocked GitHub. On failure it logs `net: fetch through <dev> failed`
+and the normal ladder runs. Without curl the setting has no effect (wget cannot
+bind to a device) and the page says so. `update.sh devs` lists the choices: up
+devices except `lo` and bridge ports, plus the default-route device and whether
+curl is present.
+
 With curl, `net_alt_paths` lists every way around a blocked direct path, with no
 setting (a field report: the carrier blocked GitHub's release downloads while
 the API answered, so the check found the update and the download sat at 0 KB):

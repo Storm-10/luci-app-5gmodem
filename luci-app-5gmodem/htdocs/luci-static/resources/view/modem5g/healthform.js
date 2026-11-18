@@ -8,7 +8,7 @@ var NBIN = '/usr/share/5gmodem/netpri.sh';
 var PBIN = '/usr/share/5gmodem/stapark.sh';
 
 return baseclass.extend({
-	API: 30942,
+	API: 40008,
 	load: function() {
 		return Promise.all([
 			L.resolveDefault(fs.exec_direct(HBIN, [ 'getconf' ]), '{}'),
@@ -182,7 +182,13 @@ return baseclass.extend({
 				'ok_n=' + n(wOk, 5),
 				'manual=' + (wMan ? L.toArray(wMan.getValue()).join(' ') : String(c.manual || '')),
 				'power_script=' + (/^\/[A-Za-z0-9\/._-]+$/.test((wPs.getValue() || '').trim()) ? (wPs.getValue() || '').trim() : '')
-			]).then(function() {
+			]).then(function(res) {
+				// setconf refuses a bad value with a non-zero code: nothing was stored
+				if (res && res.code) {
+					var why = '';
+					try { why = JSON.parse(res.stdout || '{}').error || ''; } catch (e) {}
+					throw new Error(_('Could not save the settings.') + (why ? ' (' + why + ')' : ''));
+				}
 				return Promise.all(healSel.map(function(h) {
 					return fs.exec(HBIN, [ 'setheal', h.iface, h.w.getValue() ]);
 				}));
@@ -193,12 +199,16 @@ return baseclass.extend({
 		};
 		if (opts && opts.autosave) {
 			var _as_t = null;
+			// saves run one after another: two setconf calls must not interleave
+			var _as_q = Promise.resolve();
 			var _as_kick = function() {
 				if (_as_t) { window.clearTimeout(_as_t); }
 				_as_t = window.setTimeout(function() {
 					_as_t = null;
-					save().then(function() {
+					_as_q = _as_q.then(save).then(function() {
 						if (opts.onsaved) { opts.onsaved(); }
+					}).catch(function(e) {
+						ui.addNotification(null, E('p', [ String((e && e.message) || e) ]), 'error');
 					});
 				}, 500);
 			};

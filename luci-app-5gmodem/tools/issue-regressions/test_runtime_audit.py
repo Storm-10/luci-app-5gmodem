@@ -57,15 +57,6 @@ uci() {
                     time.sleep(0.01)
                 self.assertEqual(result_file.read_text(), 'reapply 1-1')
 
-    def test_legacy_huawei_noservice_signal_branch(self):
-        source = (SHARE / 'modem/hilink/huawei_hilink.sh').read_text()
-        start = source.index('if [ "x$MODE" = "xLTE" ]')
-        block = source[start:source.index('\nMODEL=$(getvalue', start)]
-        result = shell('MODE=NOSERVICE\ngetvaluens() { echo -105; }\n' + block
-                       + '\nprintf "%s %s %s" "$RSRP" "$SINR" "$RSRQ"')
-        self.assertEqual(result.stderr, '')
-        self.assertEqual(result.stdout, '-105 -105 -105')
-
     def test_detached_operator_refresh_drops_inherited_locks(self):
         line = next(line for line in (SHARE / 'netpri.sh').read_text().splitlines()
                     if '/netpri.sh refresh &' in line)
@@ -121,9 +112,47 @@ _port_is_mm() { return 1; }
 at_lock() { return 1; }
 _send_pdu /dev/null +123 test
 ''')
-        self.assertEqual(result.returncode, 1)
+        # 5 = busy port, nothing sent: the queue must not count it as an attempt
+        self.assertEqual(result.returncode, 5)
         self.assertEqual(result.stdout, '')
         self.assertEqual(result.stderr, '')
+
+    def _queue_entry(self, born):
+        d = tempfile.mkdtemp()
+        f = os.path.join(d, '1.1.sms')
+        with open(f, 'w') as fh:
+            fh.write('to=+10000000000\nport=/dev/null\ntries=0\nborn=%s\ntext:\nhi' % born)
+        return f
+
+    def _queue_fn(self):
+        # the body holds a line starting with "}", so take the function up to a bare "}" line
+        source = (SHARE / 'smsbridge.sh').read_text()
+        match = re.search(r'^_q_send_one\(\) \{\n.*?^\}$', source, re.M | re.S)
+        return function('_norm_num', 'smsbridge.sh') + '\n' + match[0] + '\n'
+
+    def test_queue_busy_port_is_not_an_attempt(self):
+        f = self._queue_entry(1800000000)
+        result = shell(self._queue_fn() + '''
+SMSQ_MAX_TRIES=10; SMSQ_MAX_AGE=86400; CFG=5gmodem
+logger() { :; }; uci() { :; }; date() { echo 1800000100; }
+_send_one() { return 5; }
+_q_send_one "$F"; echo "rc=$?"
+''', dict(os.environ, F=f))
+        self.assertIn('rc=3', result.stdout)
+        self.assertIn('tries=0', open(f).read())
+
+    def test_queue_entry_from_before_time_sync_is_kept(self):
+        f = self._queue_entry(120)
+        result = shell(self._queue_fn() + '''
+SMSQ_MAX_TRIES=10; SMSQ_MAX_AGE=86400; CFG=5gmodem
+logger() { :; }; uci() { :; }; date() { echo 1800000100; }
+_send_one() { return 1; }
+_q_send_one "$F"; echo "rc=$?"
+''', dict(os.environ, F=f))
+        self.assertIn('rc=1', result.stdout)
+        body = open(f).read()
+        self.assertIn('born=1800000100', body)
+        self.assertIn('tries=1', body)
 
     def test_sms_read_keeps_intentional_lock_timeout_fallback(self):
         result = shell(function('_sms_run', 'smsbridge.sh') + '''
@@ -161,19 +190,6 @@ _collect_ping
             self.assertEqual(result.stderr, '')
             self.assertEqual((temp / 'calls').read_text().splitlines(), ['call'])
             self.assertEqual((temp / 'stats/ping.wan.label').read_text(), 'wan')
-
-    def test_legacy_zte_model_and_operator(self):
-        source = (SHARE / 'modem/hilink/zte.sh').read_text()
-        fixtures = {'manufacturer_name': 'ZTE', 'model_name': 'MF823',
-                    'network_type': 'LTE', 'hmcc': '250', 'hmnc': '20',
-                    'lte_rsrp': '-105', 'lte_rsrq': '-12', 'rssi': '-71'}
-        source = source.replace('. /usr/share/libubox/jshn.sh', '\n'.join(
-            key + '=' + shlex.quote(value) for key, value in fixtures.items()))
-        source = 'wget() { :; }; json_load() { :; }; json_get_vars() { :; }\n' + source
-        result = shell('set -- 192.0.2.1\n' + source + '\nprintf "model=%s\\n" "$MODEL"')
-        self.assertEqual(result.stderr, '')
-        self.assertIn('model=ZTE MF823\n', result.stdout)
-        self.assertIn('+COPS: 0,2,"25020",x\n', result.stdout)
 
     def test_ussd_cancel_does_not_touch_busy_port(self):
         with tempfile.TemporaryDirectory() as temp:

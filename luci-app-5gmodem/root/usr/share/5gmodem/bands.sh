@@ -6,6 +6,9 @@
 # (c) 2022-2024 modified by Rafał Wabik - IceG - From eko.one.pl forum
 #
 
+# the json cache lock is a mkdir in here: without the dir that loop never ends
+[ -d /tmp/5gmodem ] || mkdir -p /tmp/5gmodem 2>/dev/null
+
 if [ "$1" = mtk-package-needed ]; then
 	. /usr/share/5gmodem/lib.sh
 	if mtk_soc_modem && [ ! -x /usr/share/5gmodem/mtk/usock-armv7 ]; then
@@ -16,11 +19,25 @@ if [ "$1" = mtk-package-needed ]; then
 	exit 0
 fi
 
+# for=<usb path>, anywhere in the arguments: the modem this call is about. The page sends it with
+# every write, so the write lands on the modem it shows even when uci active_modem is another one.
+for _fa in "$@"; do
+	shift
+	case "$_fa" in
+		for=*)
+			case "${_fa#for=}" in
+				''|*[!0-9A-Za-z.:_-]*) : ;;
+				*) BANDS_ACTIVE_MODEM="${_fa#for=}" ;;
+			esac ;;
+		*) set -- "$@" "$_fa" ;;
+	esac
+done
+
 case "$1" in
-	json|jsonrefresh|mgmtinfo|nratjson|getmode|getsupportedmodes|getcelllock|applyresult)
+	json|jsonrefresh|mgmtinfo|mgmtjson|nratjson|getmode|getsupportedmodes|getcelllock|applyresult)
 		case "$2" in
 			'') : ;;
-			*[!0-9.:_-]*) : ;;
+			*[!0-9A-Za-z.:_-]*) : ;;   # letters too: SoC and PCI modem paths (ccci, *.remoteproc, hex)
 			*) BANDS_ACTIVE_MODEM="$2" ;;
 		esac ;;
 esac
@@ -49,8 +66,32 @@ if [ "$1" = "mmsetbands" ]; then
 		done
 	fi
 	logger -t 5gmodem "bands: applying via MM ($2)"
-	mmcli -m "$3" --set-current-bands="$2" 2>&1
-	_mb_rc=$?
+	# MM can answer success and keep the old list when the modem is re-probing (a reconnect by
+	# the watchdog): read the list back and try once more before reporting success
+	_mb_cb() { mmcli -m "$1" -K 2>/dev/null | sed -n 's/^modem\.generic\.current-bands\.value\[[0-9]*\] *: *//p' | sort -u | tr '\n' ' '; }
+	_mb_want=$(printf '%s' "$2" | tr '|' '\n' | sort -u | tr '\n' ' ')
+	# only "the list did not move" counts as not applied: the modem may drop a band it lacks
+	_mb_old=$(_mb_cb "$3")
+	_mb_try=0
+	while :; do
+		_mb_out=$(mmcli -m "$3" --set-current-bands="$2" 2>&1)
+		_mb_rc=$?
+		[ "$_mb_rc" = 0 ] || break
+		[ "$2" = any ] && break
+		[ -n "$_mb_old" ] && [ "$_mb_old" != "$_mb_want" ] || break
+		sleep 1
+		_mb_cur=$(_mb_cb "$3")
+		[ -n "$_mb_cur" ] && [ "$_mb_cur" = "$_mb_old" ] || break
+		_mb_try=$((_mb_try + 1))
+		if [ "$_mb_try" -gt 1 ]; then
+			logger -t 5gmodem "bands: MM kept the old list after two writes (now: $_mb_cur)"
+			_mb_out="the modem kept its previous bands ($_mb_cur) - try again once it has settled"
+			_mb_rc=3
+			break
+		fi
+		sleep 3
+	done
+	printf '%s\n' "$_mb_out"
 	exec 7>&- 2>/dev/null
 	exit "$_mb_rc"
 fi
@@ -58,6 +99,17 @@ fi
 active_modem() {
 	[ -n "$BANDS_ACTIVE_MODEM" ] && { printf '%s\n' "$BANDS_ACTIVE_MODEM"; return 0; }
 	uci -q get 5gmodem.@5gmodem[0].active_modem
+}
+
+# The global options (network, at_port) and detect.sh describe uci active_modem: no fallback to
+# them when the call names another modem.
+_sel_is_active() {
+	[ -z "$BANDS_ACTIVE_MODEM" ] \
+		|| [ "$BANDS_ACTIVE_MODEM" = "$(uci -q get 5gmodem.@5gmodem[0].active_modem)" ]
+}
+_global_opt() {
+	_sel_is_active || return 0
+	uci -q get "5gmodem.@5gmodem[0].$1"
 }
 
 _persist_bands() {
@@ -102,6 +154,30 @@ _persist_mode() {
 	[ -n "$_pm_if" ] && : > "/tmp/5gmodem/bandrestore_$_pm_if" 2>/dev/null
 }
 
+# Uplink CA (AT^ULCA) is lost on a modem restart on some firmware, so the owner's choice is
+# kept in uci and put back by restorebands. Turning it on needs a new attach (the network
+# learns the UE capability there), not a modem reboot: a reboot is what dropped it again.
+_persist_ulca() {
+	_pu_sec="m_$(active_modem | sed 's/[^A-Za-z0-9]/_/g')"
+	[ "$_pu_sec" != "m_" ] || return 0
+	if [ "$1" = 1 ]; then uci -q set "5gmodem.$_pu_sec.save_ulca=1"; else uci -q delete "5gmodem.$_pu_sec.save_ulca" 2>/dev/null; fi
+	uci -q commit 5gmodem
+}
+_cfun_cycle() {
+	[ -n "$_DEVICE" ] || return 0
+	sms_tool -d "$_DEVICE" at "AT+CFUN=4" >/dev/null 2>&1
+	sleep 3
+	_cf_n=0
+	while [ "$_cf_n" -lt 3 ]; do
+		_cf_n=$((_cf_n + 1))
+		sms_tool -d "$_DEVICE" at "AT+CFUN=1" >/dev/null 2>&1
+		sleep 2
+		case "$(sms_tool -d "$_DEVICE" at "AT+CFUN?" 2>/dev/null)" in *"+CFUN: 1"*) break ;; esac
+	done
+	# the radio is on again: "mobile.sh tick" re-applies airplane mode when it is set
+	rm -f /tmp/5gmodem/airplane.applied 2>/dev/null
+}
+
 hextobands() {
 	BANDS=""
 	HHEX=""
@@ -116,16 +192,21 @@ hextobands() {
 		HEX="0x"${HEX:CNT}
 	fi
 
-	for B in $(seq 0 63); do
+	# plain loops: no seq fork on every band read
+	B=0
+	while [ $B -lt 64 ]; do
 		POW=$((2 ** $B))
 		T=$((HEX&$POW))
 		[ "x$T" = "x$POW" ] && BANDS="${BANDS}$((B + 1)) "
+		B=$((B + 1))
 	done
 	if [ -n "$HHEX" ]; then
-		for B in $(seq 0 63); do
+		B=0
+		while [ $B -lt 64 ]; do
 			POW=$((2 ** $B))
 			T=$((HHEX&$POW))
 			[ "x$T" = "x$POW" ] && BANDS="${BANDS}$((B + 1 + 64)) "
+			B=$((B + 1))
 		done
 	fi
 	echo "$BANDS"
@@ -157,143 +238,154 @@ bandstohex() {
 	echo "$HEX"
 }
 
-bandtxt() {
+# The *_set forms fill _BTXT without a subshell: the json build runs them once per band.
+_bandtxt_set() {
+	_BTXT=""
 	BAND=$1
 
 	case "$BAND" in
-	"1") echo " $BAND: FDD 2100 MHz";;
-	"2") echo " $BAND: FDD 1900 MHz";;
-	"3") echo " $BAND: FDD 1800 MHz";;
-	"4") echo " $BAND: FDD 1700/2100 MHz";;
-	"5") echo " $BAND: FDD  850 MHz";;
-	"7") echo " $BAND: FDD 2600 MHz";;
-	"8") echo " $BAND: FDD  900 MHz";;
-	"11") echo "$BAND: FDD 1500 MHz";;
-	"12") echo "$BAND: FDD  700 MHz";;
-	"13") echo "$BAND: FDD  700 MHz";;
-	"14") echo "$BAND: FDD  700 MHz";;
-	"17") echo "$BAND: FDD  700 MHz";;
-	"18") echo "$BAND: FDD  850 MHz";;
-	"19") echo "$BAND: FDD  850 MHz";;
-	"20") echo "$BAND: FDD  800 MHz";;
-	"21") echo "$BAND: FDD 1500 MHz";;
-	"24") echo "$BAND: FDD 1600 MHz";;
-	"25") echo "$BAND: FDD 1900 MHz";;
-	"26") echo "$BAND: FDD  850 MHz";;
-	"28") echo "$BAND: FDD  700 MHz";;
-	"29") echo "$BAND: SDL  700 MHz";;
-	"30") echo "$BAND: FDD 2300 MHz";;
-	"31") echo "$BAND: FDD  450 MHz";;
-	"32") echo "$BAND: SDL 1500 MHz";;
-	"34") echo "$BAND: TDD 2000 MHz";;
-	"37") echo "$BAND: TDD 1900 MHz";;
-	"38") echo "$BAND: TDD 2600 MHz";;
-	"39") echo "$BAND: TDD 1900 MHz";;
-	"40") echo "$BAND: TDD 2300 MHz";;
-	"41") echo "$BAND: TDD 2500 MHz";;
-	"42") echo "$BAND: TDD 3500 MHz";;
-	"43") echo "$BAND: TDD 3700 MHz";;
-	"46") echo "$BAND: LAA 5200 MHz";;
-	"47") echo "$BAND: TDD 5900 MHz";;
-	"48") echo "$BAND: TDD 3500 MHz";;
-	"50") echo "$BAND: TDD 1500 MHz";;
-	"51") echo "$BAND: TDD 1500 MHz";;
-	"53") echo "$BAND: TDD 2400 MHz";;
-	"54") echo "$BAND: TDD 1600 MHz";;
-	"65") echo "$BAND: FDD 2100 MHz";;
-	"66") echo "$BAND: FDD 1700/2100 MHz";;
-	"67") echo "$BAND: SDL  700 MHz";;
-	"69") echo "$BAND: SDL 2600 MHz";;
-	"70") echo "$BAND: FDD 1700/2000 MHz";;
-	"71") echo "$BAND: FDD  600 MHz";;
-	"72") echo "$BAND: FDD  450 MHz";;
-	"73") echo "$BAND: FDD  450 MHz";;
-	"74") echo "$BAND: FDD 1500 MHz";;
-	"75") echo "$BAND: SDL 1500 MHz";;
-	"76") echo "$BAND: SDL 1500 MHz";;
-	"85") echo "$BAND: FDD  700 MHz";;
-	"87") echo "$BAND: FDD  410 MHz";;
-	"88") echo "$BAND: FDD  410 MHz";;
-	"103") echo "$BAND: FDD  700 MHz";;
-	"106") echo "$BAND: FDD  900 MHz";;
+	"1") _BTXT=" $BAND: FDD 2100 MHz";;
+	"2") _BTXT=" $BAND: FDD 1900 MHz";;
+	"3") _BTXT=" $BAND: FDD 1800 MHz";;
+	"4") _BTXT=" $BAND: FDD 1700/2100 MHz";;
+	"5") _BTXT=" $BAND: FDD  850 MHz";;
+	"7") _BTXT=" $BAND: FDD 2600 MHz";;
+	"8") _BTXT=" $BAND: FDD  900 MHz";;
+	"11") _BTXT="$BAND: FDD 1500 MHz";;
+	"12") _BTXT="$BAND: FDD  700 MHz";;
+	"13") _BTXT="$BAND: FDD  700 MHz";;
+	"14") _BTXT="$BAND: FDD  700 MHz";;
+	"17") _BTXT="$BAND: FDD  700 MHz";;
+	"18") _BTXT="$BAND: FDD  850 MHz";;
+	"19") _BTXT="$BAND: FDD  850 MHz";;
+	"20") _BTXT="$BAND: FDD  800 MHz";;
+	"21") _BTXT="$BAND: FDD 1500 MHz";;
+	"24") _BTXT="$BAND: FDD 1600 MHz";;
+	"25") _BTXT="$BAND: FDD 1900 MHz";;
+	"26") _BTXT="$BAND: FDD  850 MHz";;
+	"28") _BTXT="$BAND: FDD  700 MHz";;
+	"29") _BTXT="$BAND: SDL  700 MHz";;
+	"30") _BTXT="$BAND: FDD 2300 MHz";;
+	"31") _BTXT="$BAND: FDD  450 MHz";;
+	"32") _BTXT="$BAND: SDL 1500 MHz";;
+	"34") _BTXT="$BAND: TDD 2000 MHz";;
+	"37") _BTXT="$BAND: TDD 1900 MHz";;
+	"38") _BTXT="$BAND: TDD 2600 MHz";;
+	"39") _BTXT="$BAND: TDD 1900 MHz";;
+	"40") _BTXT="$BAND: TDD 2300 MHz";;
+	"41") _BTXT="$BAND: TDD 2500 MHz";;
+	"42") _BTXT="$BAND: TDD 3500 MHz";;
+	"43") _BTXT="$BAND: TDD 3700 MHz";;
+	"46") _BTXT="$BAND: LAA 5200 MHz";;
+	"47") _BTXT="$BAND: TDD 5900 MHz";;
+	"48") _BTXT="$BAND: TDD 3500 MHz";;
+	"50") _BTXT="$BAND: TDD 1500 MHz";;
+	"51") _BTXT="$BAND: TDD 1500 MHz";;
+	"53") _BTXT="$BAND: TDD 2400 MHz";;
+	"54") _BTXT="$BAND: TDD 1600 MHz";;
+	"65") _BTXT="$BAND: FDD 2100 MHz";;
+	"66") _BTXT="$BAND: FDD 1700/2100 MHz";;
+	"67") _BTXT="$BAND: SDL  700 MHz";;
+	"69") _BTXT="$BAND: SDL 2600 MHz";;
+	"70") _BTXT="$BAND: FDD 1700/2000 MHz";;
+	"71") _BTXT="$BAND: FDD  600 MHz";;
+	"72") _BTXT="$BAND: FDD  450 MHz";;
+	"73") _BTXT="$BAND: FDD  450 MHz";;
+	"74") _BTXT="$BAND: FDD 1500 MHz";;
+	"75") _BTXT="$BAND: SDL 1500 MHz";;
+	"76") _BTXT="$BAND: SDL 1500 MHz";;
+	"85") _BTXT="$BAND: FDD  700 MHz";;
+	"87") _BTXT="$BAND: FDD  410 MHz";;
+	"88") _BTXT="$BAND: FDD  410 MHz";;
+	"103") _BTXT="$BAND: FDD  700 MHz";;
+	"106") _BTXT="$BAND: FDD  900 MHz";;
 	esac
 }
+bandtxt() {
+	_bandtxt_set "$1"
+	[ -z "$_BTXT" ] || echo "$_BTXT"
+}
 
-bandtxt5g() {
+_bandtxt5g_set() {
+	_BTXT=""
 	BAND=$1
 
 	case "$BAND" in
-	"1") echo " $BAND: FDD 2100 MHz";;
-	"2") echo " $BAND: FDD 1900 MHz";;
-	"3") echo " $BAND: FDD 1800 MHz";;
-	"5") echo " $BAND: FDD  850 MHz";;
-	"7") echo " $BAND: FDD 2600 MHz";;
-	"8") echo " $BAND: FDD  900 MHz";;
-	"12") echo "$BAND: FDD  700 MHz";;
-	"13") echo "$BAND: FDD  700 MHz";;
-	"14") echo "$BAND: FDD  700 MHz";;
-	"18") echo "$BAND: FDD  850 MHz";;
-	"20") echo "$BAND: FDD  800 MHz";;
-	"24") echo "$BAND: FDD 1600 MHz";;
-	"25") echo "$BAND: FDD 1900 MHz";;
-	"26") echo "$BAND: FDD  850 MHz";;
-	"28") echo "$BAND: FDD  700 MHz";;
-	"29") echo "$BAND: SDL  700 MHz";;
-	"30") echo "$BAND: TDD 2300 MHz";;
-	"34") echo "$BAND: TDD 2100 MHz";;
-	"38") echo "$BAND: TDD 2600 MHz";;
-	"39") echo "$BAND: TDD 1900 MHz";;
-	"40") echo "$BAND: TDD 2300 MHz";;
-	"41") echo "$BAND: TDD 2500 MHz";;
-	"46") echo "$BAND: NR-U 5200 MHz";;
-	"47") echo "$BAND: TDD 5900 MHz";;
-	"48") echo "$BAND: TDD 3500 MHz";;
-	"50") echo "$BAND: TDD 1500 MHz";;
-	"51") echo "$BAND: TDD 1500 MHz";;
-	"53") echo "$BAND: TDD 2400 MHz";;
-	"54") echo "$BAND: TDD 1600 MHz";;
-	"65") echo "$BAND: FDD 2100 MHz";;
-	"66") echo "$BAND: FDD 1700/2100 MHz";;
-	"67") echo "$BAND: SDL  700 MHz";;
-	"70") echo "$BAND: FDD 2000 MHz";;
-	"71") echo "$BAND: FDD  600 MHz";;
-	"74") echo "$BAND: FDD 1500 MHz";;
-	"75") echo "$BAND: SDL 1500 MHz";;
-	"76") echo "$BAND: SDL 1500 MHz";;
-	"77") echo "$BAND: TDD 3700 MHz";;
-	"78") echo "$BAND: TDD 3500 MHz";;
-	"79") echo "$BAND: TDD 4700 MHz";;
-	"80") echo "$BAND: SUL 1800 MHz";;
-	"81") echo "$BAND: SUL  900 MHz";;
-	"82") echo "$BAND: SUL  800 MHz";;
-	"83") echo "$BAND: SUL  700 MHz";;
-	"84") echo "$BAND: SUL 2100 MHz";;
-	"85") echo "$BAND: FDD  700 MHz";;
-	"86") echo "$BAND: SUL 1700 MHz";;
-	"89") echo "$BAND: SUL  850 MHz";;
-	"90") echo "$BAND: TDD 2500 MHz";;
-	"91") echo "$BAND: FDD  800/1500 MHz";;
-	"92") echo "$BAND: FDD  800/1500 MHz";;
-	"93") echo "$BAND: FDD  900/1500 MHz";;
-	"94") echo "$BAND: FDD  900/1500 MHz";;
-	"95") echo "$BAND: SUL 2100 MHz";;
-	"96") echo "$BAND: TDD 6000 MHz";;
-	"97") echo "$BAND: SUL 2300 MHz";;
-	"98") echo "$BAND: SUL 1900 MHz";;
-	"99") echo "$BAND: SUL 1600 MHz)";;
-	"100") echo "$BAND: FDD  900 MHz";;
-	"101") echo "$BAND: TDD 1900 MHz";;
-	"102") echo "$BAND: TDD 6200 MHz";;
-	"104") echo "$BAND: TDD 6700 MHz";;
-	"105") echo "$BAND: FDD  600 MHz";;
-	"257") echo "$BAND: 28 GHz";;
-	"258") echo "$BAND: 26 GHz";;
-	"259") echo "$BAND: 41 GHz";;
-	"260") echo "$BAND: 39 GHz";;
-	"261") echo "$BAND: 28 GHz";;
-	"262") echo "$BAND: 47 GHz";;
-	"263") echo "$BAND: 60 GHz";;
+	"1") _BTXT=" $BAND: FDD 2100 MHz";;
+	"2") _BTXT=" $BAND: FDD 1900 MHz";;
+	"3") _BTXT=" $BAND: FDD 1800 MHz";;
+	"5") _BTXT=" $BAND: FDD  850 MHz";;
+	"7") _BTXT=" $BAND: FDD 2600 MHz";;
+	"8") _BTXT=" $BAND: FDD  900 MHz";;
+	"12") _BTXT="$BAND: FDD  700 MHz";;
+	"13") _BTXT="$BAND: FDD  700 MHz";;
+	"14") _BTXT="$BAND: FDD  700 MHz";;
+	"18") _BTXT="$BAND: FDD  850 MHz";;
+	"20") _BTXT="$BAND: FDD  800 MHz";;
+	"24") _BTXT="$BAND: FDD 1600 MHz";;
+	"25") _BTXT="$BAND: FDD 1900 MHz";;
+	"26") _BTXT="$BAND: FDD  850 MHz";;
+	"28") _BTXT="$BAND: FDD  700 MHz";;
+	"29") _BTXT="$BAND: SDL  700 MHz";;
+	"30") _BTXT="$BAND: TDD 2300 MHz";;
+	"34") _BTXT="$BAND: TDD 2100 MHz";;
+	"38") _BTXT="$BAND: TDD 2600 MHz";;
+	"39") _BTXT="$BAND: TDD 1900 MHz";;
+	"40") _BTXT="$BAND: TDD 2300 MHz";;
+	"41") _BTXT="$BAND: TDD 2500 MHz";;
+	"46") _BTXT="$BAND: NR-U 5200 MHz";;
+	"47") _BTXT="$BAND: TDD 5900 MHz";;
+	"48") _BTXT="$BAND: TDD 3500 MHz";;
+	"50") _BTXT="$BAND: TDD 1500 MHz";;
+	"51") _BTXT="$BAND: TDD 1500 MHz";;
+	"53") _BTXT="$BAND: TDD 2400 MHz";;
+	"54") _BTXT="$BAND: TDD 1600 MHz";;
+	"65") _BTXT="$BAND: FDD 2100 MHz";;
+	"66") _BTXT="$BAND: FDD 1700/2100 MHz";;
+	"67") _BTXT="$BAND: SDL  700 MHz";;
+	"70") _BTXT="$BAND: FDD 2000 MHz";;
+	"71") _BTXT="$BAND: FDD  600 MHz";;
+	"74") _BTXT="$BAND: FDD 1500 MHz";;
+	"75") _BTXT="$BAND: SDL 1500 MHz";;
+	"76") _BTXT="$BAND: SDL 1500 MHz";;
+	"77") _BTXT="$BAND: TDD 3700 MHz";;
+	"78") _BTXT="$BAND: TDD 3500 MHz";;
+	"79") _BTXT="$BAND: TDD 4700 MHz";;
+	"80") _BTXT="$BAND: SUL 1800 MHz";;
+	"81") _BTXT="$BAND: SUL  900 MHz";;
+	"82") _BTXT="$BAND: SUL  800 MHz";;
+	"83") _BTXT="$BAND: SUL  700 MHz";;
+	"84") _BTXT="$BAND: SUL 2100 MHz";;
+	"85") _BTXT="$BAND: FDD  700 MHz";;
+	"86") _BTXT="$BAND: SUL 1700 MHz";;
+	"89") _BTXT="$BAND: SUL  850 MHz";;
+	"90") _BTXT="$BAND: TDD 2500 MHz";;
+	"91") _BTXT="$BAND: FDD  800/1500 MHz";;
+	"92") _BTXT="$BAND: FDD  800/1500 MHz";;
+	"93") _BTXT="$BAND: FDD  900/1500 MHz";;
+	"94") _BTXT="$BAND: FDD  900/1500 MHz";;
+	"95") _BTXT="$BAND: SUL 2100 MHz";;
+	"96") _BTXT="$BAND: TDD 6000 MHz";;
+	"97") _BTXT="$BAND: SUL 2300 MHz";;
+	"98") _BTXT="$BAND: SUL 1900 MHz";;
+	"99") _BTXT="$BAND: SUL 1600 MHz)";;
+	"100") _BTXT="$BAND: FDD  900 MHz";;
+	"101") _BTXT="$BAND: TDD 1900 MHz";;
+	"102") _BTXT="$BAND: TDD 6200 MHz";;
+	"104") _BTXT="$BAND: TDD 6700 MHz";;
+	"105") _BTXT="$BAND: FDD  600 MHz";;
+	"257") _BTXT="$BAND: 28 GHz";;
+	"258") _BTXT="$BAND: 26 GHz";;
+	"259") _BTXT="$BAND: 41 GHz";;
+	"260") _BTXT="$BAND: 39 GHz";;
+	"261") _BTXT="$BAND: 28 GHz";;
+	"262") _BTXT="$BAND: 47 GHz";;
+	"263") _BTXT="$BAND: 60 GHz";;
 	esac
+}
+bandtxt5g() {
+	_bandtxt5g_set "$1"
+	[ -z "$_BTXT" ] || echo "$_BTXT"
 }
 
 _DEVICE=""
@@ -512,6 +604,8 @@ _reconnect_iface() {
 	# targeted down+up instead of ifup: see docs/subsystems/bands.md#reconnect-after-a-radio-cycle
 	ubus call "network.interface.$_ri_if" down >/dev/null 2>&1
 	sleep 3
+	# not for an interface the user switched off (mobile data off, airplane mode)
+	[ "$(uci -q get "network.$_ri_if.auto")" = 0 ] && return 0
 	ubus call "network.interface.$_ri_if" up >/dev/null 2>&1 || ifup "$_ri_if" >/dev/null 2>&1
 }
 
@@ -526,7 +620,7 @@ _bands_after_write() {
 	case "$_BANDS_APPLY_LIVE" in
 		1)         return 0 ;;
 		reconnect) _reconnect_iface ;;
-		*)         /usr/share/5gmodem/reboot_modem.sh soft ;;
+		*)         /usr/share/5gmodem/reboot_modem.sh soft ${BANDS_ACTIVE_MODEM:+"for=$BANDS_ACTIVE_MODEM"} ;;
 	esac
 }
 _bands_flush() {
@@ -570,6 +664,21 @@ _bands_qmi_mode() {
 	return 0
 }
 
+# Some writers return 1 when the modem already holds the list (nothing written):
+# that is not a rejection, so the saved choice stays.
+_bands_same_now() {
+	case "$1" in
+		setbands)      _bsn_g=getbands;      _bsn_s=getsupportedbands ;;
+		setbands5gnsa) _bsn_g=getbands5gnsa; _bsn_s=getsupportedbands5gnsa ;;
+		setbands5gsa)  _bsn_g=getbands5gsa;  _bsn_s=getsupportedbands5gsa ;;
+		*) return 1 ;;
+	esac
+	if [ "$2" = default ]; then _bsn_w=$("$_bsn_s" 2>/dev/null); else _bsn_w="$2"; fi
+	_bsn_w=$(echo "$_bsn_w" | sed 's/:[^ ,]*//g' | tr ' ,' '\n\n' | grep -E '^[0-9]+$' | sort -n | uniq | tr '\n' ' ')
+	_bsn_h=$("$_bsn_g" 2>/dev/null | sed 's/:[^ ,]*//g' | tr ' ,' '\n\n' | grep -E '^[0-9]+$' | sort -n | uniq | tr '\n' ' ')
+	[ -n "$_bsn_h" ] && [ "$_bsn_h" = "$_bsn_w" ]
+}
+
 _bands_set_bg() {
 	_bands_qmi_mode "$@"
 	_sbg_qmi=$?
@@ -577,10 +686,11 @@ _bands_set_bg() {
 	(
 		_sbg_how="$1"; shift
 		case "$_sbg_how" in
-			band)      _band_write "$@" || _unpersist_bands ;;
+			band)      _band_write "$@" || _bands_same_now "$@" || _unpersist_bands ;;
 			after)     "$@" && { _bands_flush; at_unlock; _bands_after_write; } ;;
 			mode)      "$@" && { _persist_mode "$2"; _bands_flush; at_unlock; _bands_after_write; } ;;
 			reconnect) "$@"; _bands_flush; at_unlock; _reconnect_iface ;;
+			ulca)      "$@" && { _persist_ulca 1; _cfun_cycle; _bands_flush; at_unlock; _reconnect_iface; } ;;
 			*)         "$@" ;;
 		esac
 		_bands_flush
@@ -617,6 +727,27 @@ getantports() {
 
 case "$1" in restorebands) _bands_flush ;; esac
 
+# mgmtjson = mgmtinfo, plus the vendor band data under "bands" when the source is
+# vendor, so the page polls once. Without MM proto mgmtinfo is always vendor, so it
+# is skipped. Band data comes from a normal "json" run and goes through its cache.
+if [ "$1" = "mgmtjson" ]; then
+	if [ "$(uci -q get "network.$(uci -q get "5gmodem.m_$(active_modem | sed 's/[^A-Za-z0-9]/_/g').network").proto")" = modemmanager ] \
+	   && command -v mmcli >/dev/null 2>&1; then
+		_mj_o=$("$0" mgmtinfo ${BANDS_ACTIVE_MODEM:+"$BANDS_ACTIVE_MODEM"} 2>/dev/null)
+		case "$_mj_o" in
+			*'"source":"vendor"'*) : ;;
+			*) printf '%s\n' "$_mj_o"; exit 0 ;;
+		esac
+	fi
+	_mj_o=$("$0" json ${BANDS_ACTIVE_MODEM:+"$BANDS_ACTIVE_MODEM"} 2>/dev/null)
+	# not JSON (port busy text): no "bands", the page asks json itself as before
+	case "$_mj_o" in
+		'{'*'}') printf '{"source":"vendor","bands":%s}\n' "$_mj_o" ;;
+		*)       echo '{"source":"vendor"}' ;;
+	esac
+	exit 0
+fi
+
 _BJ_REFRESH=""; _BJ_FORCE=""
 if [ "$1" = "jsonrefresh" ]; then
 	if [ -n "$_BJ_INNER" ]; then _BJ_REFRESH=1; else _BJ_FORCE=1; fi
@@ -628,7 +759,7 @@ if [ "$1" = "json" ] && [ -z "$_BJ_REFRESH" ]; then
 	_BJT=$(cat "$_BJF.t" 2>/dev/null)
 	case "$_BJT" in ''|*[!0-9]*) _BJT="" ;; esac
 	_BJIF=$(uci -q get "5gmodem.m_$(echo "$_BJAM" | sed 's/[^A-Za-z0-9]/_/g').network" 2>/dev/null)
-	[ -n "$_BJIF" ] || _BJIF=$(uci -q get 5gmodem.@5gmodem[0].network 2>/dev/null)
+	[ -n "$_BJIF" ] || _BJIF=$(_global_opt network 2>/dev/null)
 	_BJP=$(uci -q get "network.$_BJIF.proto" 2>/dev/null)
 	_BJMDL=$(uci -q get "5gmodem.m_$(echo "$_BJAM" | sed 's/[^A-Za-z0-9]/_/g').model" 2>/dev/null)
 	_BJCM=$(cat "$_BJF.m" 2>/dev/null)
@@ -654,7 +785,7 @@ if [ "$1" = "json" ] && [ -z "$_BJ_REFRESH" ]; then
 		_bj_lt=$(cat "$_BJF.lk/t" 2>/dev/null)
 		case "$_bj_lt" in ''|*[!0-9]*) _bj_lt="$_bj_now" ;; esac
 		if [ $((_bj_now - _bj_lt)) -ge 120 ]; then rm -rf "$_BJF.lk"; continue; fi
-		if [ ! -d "$_BJF.lk" ]; then
+		if [ ! -d "$_BJF.lk" ] && [ $((_bj_now - _bj_t0)) -lt 20 ]; then
 			_bj_ct=$(cat "$_BJF.t" 2>/dev/null)
 			case "$_bj_ct" in ''|*[!0-9]*) _bj_ct=0 ;; esac
 			[ "$_bj_ct" -ge "$_bj_t0" ] && _bj_idok && { cat "$_BJF"; exit 0; }
@@ -669,10 +800,12 @@ if [ "$1" = "json" ] && [ -z "$_BJ_REFRESH" ]; then
 	cut -d. -f1 /proc/uptime > "$_BJF.lk/t"
 	trap 'rm -rf "$_BJF.lk"' EXIT
 	trap 'exit 143' INT TERM HUP
+	# rc 3: the port was busy and the inner run gave back the old cache; do not stamp it as fresh
 	_o=$(_BJ_INNER=1 "$0" jsonrefresh ${BANDS_ACTIVE_MODEM:+"$BANDS_ACTIVE_MODEM"} 2>/dev/null)
+	_bj_rc=$?
 	_BJAM2=$(active_modem)
 	case "$_o" in
-		'{'*) if [ "$_BJAM2" = "$_BJAM" ]; then
+		'{'*) if [ "$_BJAM2" = "$_BJAM" ] && [ "$_bj_rc" != 3 ]; then
 		          printf '%s\n' "$_o" > "$_BJF.tmp" && mv "$_BJF.tmp" "$_BJF"
 		          cut -d. -f1 /proc/uptime > "$_BJF.t"
 		          printf '%s\n' "$_BJP" > "$_BJF.p"
@@ -880,7 +1013,7 @@ if [ -n "$_bs_at" ] && ! at_lock "$_bs_at" 15 && [ "$(uci -q get "5gmodem.$_bs_s
 		restorebands) at_lock "$_bs_at" 45 || logger -t 5gmodem "bands: port $_bs_at still busy, restoring bands without the queue" ;;
 		json)
 			_bs_cf="/tmp/5gmodem/bands_$_bs_am"
-			[ -s "$_bs_cf" ] && { cat "$_bs_cf"; exit 0; }
+			[ -s "$_bs_cf" ] && { cat "$_bs_cf"; [ -n "$_BJ_INNER" ] && exit 3; exit 0; }
 			echo "AT port $_bs_at is busy"
 			exit 1 ;;
 		*)
@@ -1076,7 +1209,7 @@ if [ -n "$_AMP" ]; then
 	done
 
 	if [ -z "$_found" ] && [ -n "$_AVIDPID" ]; then
-		_atp="$_bs_at"; [ -n "$_atp" ] || _atp=$(uci -q get 5gmodem.@5gmodem[0].at_port)
+		_atp="$_bs_at"; [ -n "$_atp" ] || _atp=$(_global_opt at_port)
 		command -v tty_no_at >/dev/null 2>&1 || . /usr/share/5gmodem/noatports.sh
 		[ -n "$_atp" ] && tty_no_at "$_atp" && _atp=""
 		if [ -n "$_atp" ] && [ -e "$_atp" ]; then
@@ -1161,7 +1294,7 @@ if [ "$_PORT_OK" = 1 ]; then
 		_PORT_OK=0
 	else
 		_bo_if=$(uci -q get "5gmodem.$_bs_sec.network")
-		[ -n "$_bo_if" ] || _bo_if=$(uci -q get 5gmodem.@5gmodem[0].network)
+		[ -n "$_bo_if" ] || _bo_if=$(_global_opt network)
 		if [ "$(uci -q get "network.$_bo_if.proto" 2>/dev/null)" != "modemmanager" ] \
 		   && pgrep -f '/usr/sbin/ModemManager' >/dev/null 2>&1; then
 			_bo_c="/tmp/5gmodem/mmowns_$(echo "$_bs_am" | sed 's/[^A-Za-z0-9]/_/g')"
@@ -1195,7 +1328,7 @@ fi
 
 if [ "$_BAND_VIA" = "mmcli" ]; then
 	_IFACE=$(uci -q get "5gmodem.$_bs_sec.network")
-	[ -n "$_IFACE" ] || _IFACE=$(uci -q get 5gmodem.@5gmodem[0].network)
+	[ -n "$_IFACE" ] || _IFACE=$(_global_opt network)
 	_bs_ipr=$(uci -q get "network.$_IFACE.proto" 2>/dev/null)
 	_BAND_NO_TAKEOVER=""
 	if [ "$_bs_ipr" = "mbimp" ]; then
@@ -1280,7 +1413,7 @@ _mm_takeover_run() {
 	_mt_op="$1"; _mt_list="$2"
 	_mt_path="$_bs_am"
 	_mt_if=$(uci -q get "5gmodem.$_bs_sec.network" 2>/dev/null)
-	[ -n "$_mt_if" ] || _mt_if=$(uci -q get 5gmodem.@5gmodem[0].network 2>/dev/null)
+	[ -n "$_mt_if" ] || _mt_if=$(_global_opt network 2>/dev/null)
 	logger -t 5gmodem "band-set: temporary MM takeover for $_mt_path (iface $_mt_if): $_mt_op $_mt_list"
 	[ -n "$_mt_if" ] && ifdown "$_mt_if" 2>/dev/null
 	"$_R/mm-inhibit.sh" pause "$_mt_path" 2>/dev/null
@@ -1380,6 +1513,8 @@ _band_write() {
 	[ "$(cat "$_BW_TOK" 2>/dev/null)" = "$_bw_me" ] || return 0
 	rm -f "$_BW_PEND" "$_BW_TOK"
 	_bands_after_write
+	# the write itself went through: a failed reconnect must not un-save the list
+	return 0
 }
 
 . /usr/share/5gmodem/lib.sh 2>/dev/null
@@ -1827,7 +1962,7 @@ case $1 in
 		;;
 	"restorebands")
 		_rb_sec="m_$(active_modem | sed 's/[^A-Za-z0-9]/_/g')"
-		_rb_changed=0
+		_rb_changed=0; _rb_ulca=0
 		_rb_norm() { echo "$1" | tr ' ,' '\n\n' | grep -E '^[0-9]+$' | sort -n | uniq | tr '\n' ' ' | sed 's/ *$//'; }
 		_rb_one() {
 			_rb_saved=$(uci -q get "5gmodem.$_rb_sec.save_band$1")
@@ -1855,6 +1990,12 @@ case $1 in
 				setmode "$_rb_msaved" >/dev/null 2>&1 && _rb_changed=1
 			fi
 		fi
+		if [ "$(uci -q get "5gmodem.$_rb_sec.save_ulca")" = 1 ] && [ "$(getulca 2>/dev/null)" = off ]; then
+			if setulca on >/dev/null 2>&1; then
+				logger -t 5gmodem "restorebands: uplink aggregation enabled again for $(active_modem)"
+				_rb_ulca=1
+			fi
+		fi
 		if [ "$2" = "prepare" ]; then
 			if [ "$_rb_changed" = 1 ]; then
 				logger -t 5gmodem "restorebands(prepare): mask written before dialing for $(active_modem)"
@@ -1864,17 +2005,10 @@ case $1 in
 		fi
 		if [ "$_rb_changed" = 1 ]; then
 			logger -t 5gmodem "restorebands: saved bands restored for $(active_modem)"
-			if ! _bands_live && [ -n "$_DEVICE" ]; then
-				sms_tool -d "$_DEVICE" at "AT+CFUN=4" >/dev/null 2>&1
-				sleep 3
-				_cf_n=0
-				while [ "$_cf_n" -lt 3 ]; do
-					_cf_n=$((_cf_n + 1))
-					sms_tool -d "$_DEVICE" at "AT+CFUN=1" >/dev/null 2>&1
-					sleep 2
-					case "$(sms_tool -d "$_DEVICE" at "AT+CFUN?" 2>/dev/null)" in *"+CFUN: 1"*) break ;; esac
-				done
-			fi
+			if ! _bands_live || [ "$_rb_ulca" = 1 ]; then _cfun_cycle; fi
+			_reconnect_iface
+		elif [ "$_rb_ulca" = 1 ]; then
+			_cfun_cycle
 			_reconnect_iface
 		fi
 		;;
@@ -1943,7 +2077,9 @@ case $1 in
 		;;
 	"setulca")
 		case "$2" in
-			on) _bands_set_bg after setulca on ;;
+			on) _bands_set_bg ulca setulca on ;;
+			# no command turns it off: this only stops putting it back after a restart
+			forget) _persist_ulca 0; _bands_flush ;;
 		esac
 		;;
 	"getcelllock5g")
@@ -1987,7 +2123,7 @@ case $1 in
 			  esac
 			  _reconnect_iface
 			  _cl_at=$(uci -q get "5gmodem.$_cl_sec.at_port")
-			  [ -n "$_cl_at" ] || _cl_at=$(/usr/share/5gmodem/detect.sh 2>/dev/null)
+			  [ -n "$_cl_at" ] || ! _sel_is_active || _cl_at=$(/usr/share/5gmodem/detect.sh 2>/dev/null)
 			  if [ -n "$_cl_at" ] && [ -e "$_cl_at" ]; then
 				_cl_ok=0
 				for _cl_i in 1 2 3 4 5 6; do
@@ -2053,15 +2189,17 @@ case $1 in
 		ULCA=$(_live_or_unsupported getulca)
 		if [ "x$ULCA" != "xUnsupported" ]; then
 			json_add_string ulca "$ULCA"
+			[ "$(uci -q get "5gmodem.m_$(active_modem | sed 's/[^A-Za-z0-9]/_/g').save_ulca")" = 1 ] && json_add_int ulca_saved 1
 		fi
 		json_add_array supported
 		T=$(getsupportedbands)
 		if [ "x$T" != "xUnsupported" ]; then
 			for BAND in $T; do
+				case "$BAND" in ''|*[!0-9]*) continue ;; esac
 				json_add_object ""
-				json_add_int band $BAND
-				TXT="$(bandtxt $BAND)"
-				json_add_string txt "${TXT##*: }"
+				json_add_int band "$BAND"
+				_bandtxt_set "$BAND"
+				json_add_string txt "${_BTXT##*: }"
 				json_close_object
 			done
 		fi
@@ -2070,7 +2208,8 @@ case $1 in
 		T=$([ "$_PORT_OK" = "1" ] && getbands)
 		if [ -n "$T" ] && [ "x$T" != "xUnsupported" ]; then
 			for BAND in $T; do
-				json_add_int "" $BAND
+				case "$BAND" in ''|*[!0-9]*) continue ;; esac
+				json_add_int "" "$BAND"
 			done
 		fi
 		json_close_array
@@ -2135,10 +2274,11 @@ case $1 in
 		if [ "x$T" != "xUnsupported" ]; then
 			json_add_array supported5gnsa
 			for BAND in $T; do
+				case "$BAND" in ''|*[!0-9]*) continue ;; esac
 				json_add_object ""
-				json_add_int band $BAND
-				TXT="$(bandtxt5g $BAND)"
-				json_add_string txt "${TXT##*: }"
+				json_add_int band "$BAND"
+				_bandtxt5g_set "$BAND"
+				json_add_string txt "${_BTXT##*: }"
 				json_close_object
 			done
 			json_close_array
@@ -2146,7 +2286,8 @@ case $1 in
 			T=$([ "$_PORT_OK" = "1" ] && getbands5gnsa)
 			if [ -n "$T" ] && [ "x$T" != "xUnsupported" ]; then
 				for BAND in $T; do
-					json_add_int "" $BAND
+					case "$BAND" in ''|*[!0-9]*) continue ;; esac
+					json_add_int "" "$BAND"
 				done
 			fi
 			json_close_array
@@ -2155,10 +2296,11 @@ case $1 in
 		if [ "x$T" != "xUnsupported" ]; then
 			json_add_array supported5gsa
 			for BAND in $T; do
+				case "$BAND" in ''|*[!0-9]*) continue ;; esac
 				json_add_object ""
-				json_add_int band $BAND
-				TXT="$(bandtxt5g $BAND)"
-				json_add_string txt "${TXT##*: }"
+				json_add_int band "$BAND"
+				_bandtxt5g_set "$BAND"
+				json_add_string txt "${_BTXT##*: }"
 				json_close_object
 			done
 			json_close_array
@@ -2166,7 +2308,8 @@ case $1 in
 			T=$([ "$_PORT_OK" = "1" ] && getbands5gsa)
 			if [ -n "$T" ] && [ "x$T" != "xUnsupported" ]; then
 				for BAND in $T; do
-					json_add_int "" $BAND
+					case "$BAND" in ''|*[!0-9]*) continue ;; esac
+					json_add_int "" "$BAND"
 				done
 			fi
 			json_close_array

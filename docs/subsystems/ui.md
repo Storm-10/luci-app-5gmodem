@@ -1,11 +1,13 @@
 # UI: LuCI views and shared JS helpers
 
-The web UI lives in `htdocs/luci-static/resources/view/modem5g/`. `5gdetail.js` is the "Network" page (modem card, cell info, CA/neighbour/antenna tables, band management, TTL, simple view). `modemtabs.js` is the modem switcher bar shown on every page, and it also decides which menu tabs are visible. `mutil.js` holds stateless helpers shared by all pages: band frequency tables, labels, formatters, the signal quality scale, operator icons and localStorage hygiene. `align.js` is the antenna alignment page, `5gstats.js` the statistics page, `buttons.js` the hardware buttons page, and `sendsms.js` the SMS composer. All styling is in `modem.css`, described in [ui-css.md](ui-css.md). Polling and snapshot freshness on the backend side are covered in [polling.md](polling.md).
+The web UI lives in `htdocs/luci-static/resources/view/modem5g/`. `5gdetail.js` is the "Network" page (modem card, cell info, CA/neighbour/antenna tables, band management, TTL, simple view). `modemtabs.js` is the modem switcher bar shown on every page, and it also decides which menu tabs are visible. `mutil.js` holds stateless helpers shared by all pages: band frequency tables, labels, formatters, the signal quality scale, operator icons and localStorage hygiene. `align.js` is the antenna alignment page, `5gstats.js` the statistics page, `buttons.js` the hardware buttons page, `sms.js` the SMS page (conversations, feed and composer; `readsms.js` and `sendsms.js` only redirect to it), and `gps.js` the GPS page. Shared styling is in `modem.css`, described in [ui-css.md](ui-css.md); each redesigned page adds its own `page-<name>.css` (sms, ussd, at, modem, align, stats, buttons, esim, settings), loaded once by its view. Polling and snapshot freshness on the backend side are covered in [polling.md](polling.md).
 
 ## Shared CSS and theme probes
 
 - `modemtabs.js` injects `modem.css` once (`#tg-modem-css`). Every app page requires `modemtabs`, so one loader is enough, and the file is cached like any other static asset. Before this, 19 `<style>` blocks were rebuilt on every page load.
-- `buttons.js` keeps its own copy of the loader and of the `tg-boxed-sec` probe on purpose. That page does not show modem tabs and does not require `modemtabs`. Without the copy it rendered unstyled.
+- `buttons.js` shows no modem bar but still requires `modemtabs` and calls `refreshMenuTabs()` in `load`. Tabs hidden by settings ("Internet priorities only", alignment, statistics) and by the remembered eSIM/USSD state are hidden by style rules from `modemtabs`. Until 3.9.43 the page kept its own copy of the CSS loader instead, and opening Buttons showed every hidden tab again. `refreshMenuTabs` only reads uci and localStorage; it does not call the modem.
+- `5gdebug.js`, `align.js` and `5gstats.js` each inject one page stylesheet (`#tg-page-modem-css`, `#tg-page-align-css`, `#tg-page-stats-css`) the same way. Their classes use the page prefix (`tg-modem-`, `tg-align-`, `tg-stats-`), so they do not depend on generic classes other pages may add to `modem.css`; tiles, bars and the collapse animation (`tg-hist-card`, `tg-mbar`, `tg-collapse`) come from `modem.css`. `align.js` used to build an inline `<style>` on every render; that CSS now lives in `page-align.css`.
+- Page layout of these three views follows the Network/GPS pages: a header card in the `tginfo-general` layout (monospace title, badges, icon with a short caption, main line, status pill on the right; on phones the pill moves into the title), `tg-hist-card` tiles, and collapsible blocks with the `5gm-blk-<key>` storage keys of `collapsibleSection()` plus a summary on the right (keys `mprof`, `mdiag`, `alsnd`, `alhow`, `stset`).
 - The loader IIFE has to come **after** all `'require ...'` directives. Any code between them stops LuCI from parsing the rest of the directives.
 - `tg-boxed-sec` on `<html>` means the theme draws `.cbi-section` as a card (border, background or shadow). This is true for proton2025 and argon. Only these themes get an inner section padding. bootstrap does not frame sections, so the same padding showed up as empty side margins. The probe uses a real element in the page container, because a theme rule can be scoped to it. It runs once, before rendering.
 - `tg-theme-argon` is set from the theme stylesheet URL. It scopes the few argon-only fixes (see ui-css.md).
@@ -64,6 +66,31 @@ The LuCI menu tree is cached in `/tmp/luci-indexcache.<hash>.json`. The hash is 
 - Alignment is hidden when `align_enabled` is empty. Statistics is shown when its flag is empty, because collection is on by default. The settings page calls the refresh hook after saving, so no reload is needed.
 - Tab visibility is computed after the first render. Calls made in the same tick share one ubus batch, and the page would otherwise wait for the slowest script.
 
+## Render first
+
+A page shows its whole layout at once and fills it in: `load()` waits only for what the layout
+itself is built from (uci, cached files, the API check), and anything that asks the router to do
+work (AT, scans, package manager, settings forms with port lists) runs after `render()`. Values
+not known yet are dashes or `.tg-skel` placeholder bars (`modem.css`, a shimmer that stops under
+`prefers-reduced-motion`). On a busy router every CGI call can take seconds, and a `load()` that
+waited for them kept the page on LuCI's "Loading view…" for 15-20 s.
+
+- SMS: the read marks and the phone book load after render; the list shows placeholder rows until
+  the first `status`/`recv` and waits for the read marks so new messages are marked right. The
+  settings block is drawn with placeholders and gets the form when `tabbedPanel()` resolves.
+- USSD: the same for its settings block (`smssettings.panel('ussd')`).
+- GPS: the map box, reading tiles and Receiver block are there before the first `status`
+  (see [gps.md](gps.md)).
+- Buttons: the header is drawn with placeholders; the button, LED and service lists fill it.
+- Settings: `load()` waits only for uci. After the form is rendered, the installed app and APN
+  database versions fill the update card (`update.sh version` reads the apk/opkg database directly
+  instead of two package manager runs), the service list (`buttons.sh services`, no subshell per
+  init script) extends the service monitor selects, the USB device list replaces the placeholders
+  of the device blacklist, and the uhttpd row appears with its value (and stays out when uhttpd is
+  not used). A value that arrives late is not a user edit: the autosave signature (`formSig`) is
+  moved along with it when the form was unchanged.
+- AT: the modem list is asked in parallel with the command files instead of after them.
+
 ## Busy overlay
 
 `modemtabs.setBusy(selector, msg[, safetyMs[, progressSec]])` and `clearBusy()` cover a block while the modem re-enumerates (30–60 s). It is used by the Network page and by eSIM. `progressSec` shows a progress bar styled like the metric bars. It fills by expected time, stops at 97%, and completes to 100% when `clearBusy` is called. Spinner and progress bar are mutually exclusive. Styles are in `modem.css`. `_busyCss` is an intentionally empty stub kept for existing callers. `5gdetail.js: setModemBusy` is the card-level variant. `pollData` clears it once registration or signal is back, but not before a minimum hold time. Right after the command, the modem still looks alive, and the next poll would have cleared the overlay too early.
@@ -90,6 +117,7 @@ The LuCI menu tree is cached in `/tmp/luci-indexcache.<hash>.json`. The hash is 
 - `simslot.sh` and `bands.sh` start after the first successful poll tick (`afterFirstPoll`), with a 1.5 s safety timer. Fixed 400/600 ms timers made them hit `at_lock` during the first full poll.
 - The band block is refreshed by a single scheduler, every ~3 polls (`_bandsPollN`) and only when expanded. Background band changes (restore after reboot, proto auto-apply) do not notify the page. A second refresher only doubled requests and redraw races.
 - `align.js` takes the click rate for sound feedback from `au.curSinr`. `st` has no such field, and reading it played clicks at the SINR=0 rate.
+- `align.js` layout: header card (base station, sector, EARFCN; mode, band and MIMO badges; SINR quality pill; sound button and interval on the right, a row under the card on phones), four quality tiles (SINR larger, with the change since the previous reading), the SINR chart next to the MIMO grid, the best-cells table (target row marked), and two collapsible blocks: Sound (volumes, custom sound, preview) and How to use it. Without a stored choice the instructions are open until the first reading arrives, then fold without storing anything. The chart is redrawn by a ResizeObserver, so it is not drawn at zero width.
 
 ### Render stability rules
 
@@ -162,7 +190,7 @@ The scroll jumps on proton2025 had several independent causes. Rules:
 
 `renderBar` also removes the entry-fade class after the animation. Leaving the class on would block later transitions on the same container.
 
-## sendsms.js
+## SMS composer (sms.js, formerly sendsms.js)
 
 - The SMS transport (sms_tool / sms_tool_mm) is chosen by `smsbridge.sh`. The page does not know it.
 - The character counter never truncates text. Long messages are supported: the bridge splits UCS2 into 67-unit parts with concatenation UDH (`smspdu.sh`), and sms_tool handles GSM-7 multipart. Changing the encoding only converts the text to GSM-7.
@@ -177,14 +205,20 @@ The scroll jumps on proton2025 had several independent causes. Rules:
 
 - Uses its own small canvas renderer, with no CDN, because routers may be offline. The canvas is sized in physical pixels (`devicePixelRatio`). Geometry is stored on the element (`__chart`) for hover lookup. Fill and line share the same quadratic-midpoint path, so the gradient never crosses the line. Cubic splines overshot.
 - Hover redraw must pass the same options as the normal draw, or a fixed 0..100 scale is lost.
-- A hidden card has a zero-width canvas. Redraw when it becomes visible.
+- A hidden card has a zero-width canvas. `drawChart` does not draw at zero size but keeps its arguments on the element (`__args`); a ResizeObserver redraws each canvas once it gets a size (card shown, block expanded, window resized). Cards are made visible before drawing.
+- `redraw()` finds its targets by id, so the first refresh runs after LuCI has inserted the page (`setTimeout 0`), not inside `render()`.
+- Layout: header card with this month's traffic as the main line (total, then received/sent under it) and a row of controls: the "Collection" switch (the `show_stats` flag of Settings, saved the same way: `uci.set` + `uci.save` + rpc `uci commit 5gmodem`, then `modemtabs.refreshGateTabs()`, so switching it off hides the tab as in Settings), "Keep after reboot" (`stats.sh setconf persist=`, on by default) and "Collect in background:" Off / every 5 minutes / every minute (`setconf bgpoll=`; unset means every 5 minutes, `0` means off), a segmented control styled like the SMS view switch. A second row, "Store in:" (`setconf path=`, shown only while storing is on, the explanation is its tooltip) and "Reset statistics". The explanations are the controls' tooltips; the write location is the tooltip of the persist switch and becomes a warning line only when the drive is not mounted or there is nowhere to write. Pill: collecting, paused (collection off), drive not mounted. A switch flips at once, is disabled while its save runs (the 10 s refresh does not touch it then) and goes back if the save fails. Below: four tiles of one shape (name, value, bar, footer: latency, signal, RSRP with SINR in the footer, temperature; there is no traffic tile, the month is in the header), the charts as cards of one structure (title, 160 px canvas, legend with the latest value): latency, signal, RSRP, SINR, temperature, two per row, an odd last card spans the row (`tg-stats-wide`). Then monthly traffic as cards per SIM or interface (newest month first, delete button per card). With no points at all, one empty-state card replaces the charts.
+- The traffic cards and legends are rebuilt only when their data signature changes (`data-sig`), not on every 10 s refresh.
 - Traffic rows are keyed `sim-<iccid>` or by interface name. A bare `sim-...` key with no label is shown as `ICCID: ...`, and the number formatter is not applied to it. The operator label `op.<key>` is stored per card on the router.
 - While the page is open, it triggers collection every 10 s. The background collector runs every 30 s.
+- One refresh is one exec: `stats.sh bundle tick` (the first render reuses `bundle` from `load()`). If the backend answers with a usage error (older `stats.sh`), the page switches to the old `tick`/`list`/`series`/`traffic` calls until reload; a failed exec does not trigger the switch.
 
 ## buttons.js
 
 - Buttons and switches come from DTS `linux,code` / `linux,input-type` (EV_KEY = button, EV_SW = switch). The backend is `buttons.sh`.
-- Saves run **sequentially**. Each `buttons.sh set/setleds` call does `uci set` plus `uci commit`, and commit clears the delta: a parallel write between read and clear was lost while `Promise.all` reported success. Two parallel `setleds` also restarted `/etc/init.d/led` on top of each other. `btntype` is not written, because nothing reads it and every commit is a flash write.
+- Layout: a header card in the Network-page layout with the count of configured buttons and "+ name" for the ones not added yet; one card per button with the name, a type badge and a segment for the state (Pressed/Released, Switch ON/OFF for a switch). Command on the left, LED chips on the right (click cycles: not touched, on, off). Styles are in `page-buttons.css` (`tg-btn-*`); the command terminal keeps the `btnterm` styles of modem.css.
+- Save is one exec: `buttons.sh save <button> field=value ...` (was 7-9 `set`/`setleds` calls). Every field name is checked against the `set`/`setleds` options before anything is written, values are passed as argv and never evaluated, there is one `uci commit`, and LED detaching plus `led reload` and the LED resync run once after it. An older `buttons.sh` answers with a usage error and the page falls back to the per-field calls below.
+- Per-field saves run **sequentially**. Each `buttons.sh set/setleds` call does `uci set` plus `uci commit`, and commit clears the delta: a parallel write between read and clear was lost while `Promise.all` reported success. Two parallel `setleds` also restarted `/etc/init.d/led` on top of each other. `btntype` is not written, because nothing reads it and every commit is a flash write.
 
 - Bootstrap's help icon (`.cbi-value-description::before`, absolute, 1em) sits at the top of the first line box. With the 18 px line height of a 13 px description it was 2.5 px above the text. On our pages it is moved down by `calc((1lh - 1em) / 2)`, with `.19em` as a fallback for browsers without `lh`. Checkbox rows hide the icon (see the flag-row rules).
 

@@ -41,7 +41,7 @@ serial_valid() {
 		*[!A-Za-z0-9._:-]*) return 1 ;;
 	esac
 	[ "${#_sv}" -ge 6 ] || return 1
-	_sv1=$(printf '%s' "$_sv" | cut -c1)
+	_sv1="${_sv%"${_sv#?}"}"
 	case "$_sv" in
 		*[!"$_sv1"]*) ;;
 		*) return 1 ;;
@@ -72,14 +72,22 @@ stub_serial_add() {
 	return 0
 }
 
+# sysfs reads with the read builtin: listmodems.sh walks every USB device here on each rebuild
+_sysfs_line() {
+	_SFL=""
+	IFS= read -r _SFL 2>/dev/null < "$1"
+	case "$_SFL" in *[[:cntrl:]]*) _SFL=$(printf '%s' "$_SFL" | tr -d '\r\n') ;; esac
+}
+
 serial_of() {
-	_so_s=$(cat "$1/serial" 2>/dev/null | tr -d '\r\n')
+	_sysfs_line "$1/serial"; _so_s="$_SFL"
 	serial_valid "$_so_s" || { printf ''; return 1; }
 	stub_serial_known "$_so_s" && { printf ''; return 1; }
 	_so_n=0
 	for _so_d in /sys/bus/usb/devices/*; do
 		[ -f "$_so_d/serial" ] || continue
-		[ "$(cat "$_so_d/serial" 2>/dev/null | tr -d '\r\n')" = "$_so_s" ] && _so_n=$((_so_n + 1))
+		_sysfs_line "$_so_d/serial"
+		[ "$_SFL" = "$_so_s" ] && _so_n=$((_so_n + 1))
 	done
 	[ "$_so_n" = 1 ] || { stub_serial_add "$_so_s"; printf ''; return 1; }
 	printf '%s' "$_so_s"
@@ -88,6 +96,69 @@ serial_of() {
 usb_path_present() {
 	[ -n "$1" ] || return 1
 	[ -e "/sys/bus/usb/devices/$1" ] || [ -e "/sys/bus/pci/devices/${1##*/}" ] || soc_modem_node "$1" >/dev/null
+}
+
+# PCIe modems on the kernel's generic MHI driver. One controller can carry two data paths:
+# mhi_net (channel IP_HW0, raw IP, driven over QMI) or mhi_wwan_mbim (IP_HW0_MBIM, driven over
+# MBIM). The protocol follows the data endpoint that is really bound, not the order of the control
+# ports: an MBIM control port alone does not mean there is an MBIM data channel.
+# See docs/subsystems/interfaces.md#pcie-modems-on-generic-mhi.
+_pci_root() {
+	[ -n "$1" ] || return 1
+	_pr=$(readlink -f "${PCI_SYSFS:-/sys}/bus/pci/devices/${1##*/}" 2>/dev/null)
+	[ -n "$_pr" ] && [ -d "$_pr" ] && printf '%s' "$_pr"
+}
+
+# pci_data_netdev <pci address>: the single data netdev of the modem. IP_SW0 is the software
+# side channel next to IP_HW0 and never carries the data call; a QMI mux parent is skipped in
+# favour of its child. Several independent endpoints are ambiguous: nothing is printed.
+pci_data_netdev() {
+	_pdn_r=$(_pci_root "$1") || return 1
+	_pdn_l=$(find "$_pdn_r" -name net -type d 2>/dev/null | while IFS= read -r _pdn_d; do
+		for _pdn_e in "$_pdn_d"/*; do
+			[ -e "$_pdn_e" ] || continue
+			[ -d "$_pdn_e/net" ] && continue
+			case "$_pdn_e" in */mhi*_IP_SW*/net/*) continue ;; esac
+			printf '%s\n' "${_pdn_e##*/}"
+		done
+	done | sort -u)
+	[ -n "$_pdn_l" ] || return 1
+	[ "$(printf '%s\n' "$_pdn_l" | grep -c .)" = 1 ] || return 1
+	case "$_pdn_l" in *[!A-Za-z0-9_.:-]*) return 1 ;; esac
+	printf '%s' "$_pdn_l"
+}
+
+# pci_data_proto <pci address>: "qmi" or "mbim" by the bound data endpoint, empty when unknown
+pci_data_proto() {
+	_pdp_r=$(_pci_root "$1") || return 1
+	_pdp_n=$(pci_data_netdev "$1")
+	if [ -n "$_pdp_n" ]; then
+		case "$(basename "$(readlink -f "${PCI_SYSFS:-/sys}/class/net/$_pdp_n/device/driver" 2>/dev/null)" 2>/dev/null)" in
+			mhi_net) echo qmi; return 0 ;;
+			mhi_wwan_mbim) echo mbim; return 0 ;;
+		esac
+	fi
+	# a native WWAN link may hang off the controller, not off its channel
+	for _pdp_c in "$_pdp_r"/mhi*/mhi*_IP_HW0_MBIM; do
+		[ -e "$_pdp_c" ] || continue
+		[ "$(basename "$(readlink -f "$_pdp_c/driver" 2>/dev/null)" 2>/dev/null)" = mhi_wwan_mbim ] && { echo mbim; return 0; }
+	done
+	return 1
+}
+
+# pci_ctl_node <pci address> <qmi|mbim|at>: the control port of that type under the same device
+pci_ctl_node() {
+	_pcn_r=$(_pci_root "$1") || return 1
+	for _pcn_p in "${PCI_SYSFS:-/sys}"/class/wwan/*; do
+		[ -e "$_pcn_p/device" ] || continue
+		case "$(readlink -f "$_pcn_p/device" 2>/dev/null)/" in "$_pcn_r"/*) ;; *) continue ;; esac
+		_pcn_t=$(cat "$_pcn_p/type" 2>/dev/null | tr 'A-Z' 'a-z')
+		[ -n "$_pcn_t" ] || case "${_pcn_p##*/}" in
+			*mbim*) _pcn_t=mbim ;; *qmi*) _pcn_t=qmi ;; *at*) _pcn_t=at ;;
+		esac
+		[ "$_pcn_t" = "$2" ] && { printf '/dev/%s' "${_pcn_p##*/}"; return 0; }
+	done
+	return 1
 }
 
 mtk_soc_modem() {
@@ -445,14 +516,28 @@ secname() {
 _UCI_NL='
 '
 
+# Line of snapshot $1 that starts with $2 (the first one, or the last one when $3 is set), minus that prefix, in _USL.
+# A loop over lines on purpose: ${snap#*"key"} is quadratic in BusyBox ash and costs tens of
+# milliseconds per lookup on a config of a few KB, more than the uci call the snapshot saves.
+_uci_snap_line() {
+	_USL=""; _usl_rc=1
+	_usl_ifs="$IFS"; _usl_iset="${IFS+1}"; _usl_f=""
+	case "$-" in *f*) _usl_f=1 ;; esac
+	set -f; IFS="$_UCI_NL"
+	for _usl_l in $1; do
+		case "$_usl_l" in
+			"$2"*) _USL="${_usl_l#"$2"}"; _usl_rc=0; [ -n "$3" ] || break ;;
+		esac
+	done
+	if [ -n "$_usl_iset" ]; then IFS="$_usl_ifs"; else unset IFS; fi
+	[ -n "$_usl_f" ] || set +f
+	return "$_usl_rc"
+}
+
 _uci_snap_get() {
-	case "$1" in
-		*"$_UCI_NL$2="*)
-			_usv="${1#*"$_UCI_NL$2="}"
-			_usv="${_usv%%"$_UCI_NL"*}"
-			_usv="${_usv#\'}"
-			printf '%s' "${_usv%\'}" ;;
-	esac
+	_uci_snap_line "$1" "$2=" || return 0
+	_usv="${_USL#\'}"
+	printf '%s' "${_usv%\'}"
 }
 
 _UCI5G_SNAP=""
@@ -473,14 +558,9 @@ uci_sec_snap() {
 	printf '%s%s' "$_UCI_NL" "$(uci -q show "$1.$2" 2>/dev/null)"
 }
 uci_sec_val() {
-	_usv_p="$_UCI_NL$2.$3="
-	case "$1" in
-		*"$_usv_p"*)
-			_usv_v="${1##*"$_usv_p"}"
-			_usv_v="${_usv_v%%"$_UCI_NL"*}"
-			_usv_v="${_usv_v#\'}"
-			printf '%s' "${_usv_v%\'}" ;;
-	esac
+	_uci_snap_line "$1" "$2.$3=" last || return 0
+	_usv_v="${_USL#\'}"
+	printf '%s' "${_usv_v%\'}"
 }
 
 _USEC_SEC=""; _USEC_SNAP=""
@@ -625,6 +705,88 @@ remote_tele() {
 	printf '%s' "$_rt_b" > "$_rt_f.tmp" && mv "$_rt_f.tmp" "$_rt_f"
 	printf '%s\n' "$_rt_now" > "$_rt_f.t"
 	printf '%s' "$_rt_b"
+}
+
+# OpenWrt 25.12.6 mbim.sh (umbim, commit 152b86e6ab) gives the network's DNS servers to the
+# "<iface>_4"/"_6" child interfaces only when dhcp=1, so with the default dhcp=auto an MBIM link
+# comes up with no resolver: probes by IP pass, names do not resolve (fixed on OpenWrt main by
+# b556a45351, not in 25.12.6). Prints the servers the modem reported when the interface is in
+# that state; empty when it is not (another proto, peerdns=0, DNS present, link down).
+mbim_lost_dns() {
+	_mld_if="$1"
+	[ -n "$_mld_if" ] || return 1
+	[ "$(uci -q get "network.$_mld_if.proto")" = mbim ] || return 1
+	[ "$(uci -q get "network.$_mld_if.peerdns")" = 0 ] && return 1
+	_mld_st=$(ubus call "network.interface.$_mld_if" status 2>/dev/null) || return 1
+	case "$_mld_st" in *'"up": true'*) ;; *) return 1 ;; esac
+	_mld_key=""
+	for _mld_n in "$_mld_if" "${_mld_if}_4" "${_mld_if}_6"; do
+		[ "$_mld_n" = "$_mld_if" ] || _mld_st=$(ubus call "network.interface.$_mld_n" status 2>/dev/null) || continue
+		[ -n "$(printf '%s' "$_mld_st" | jsonfilter -e '@["dns-server"][*]' 2>/dev/null)" ] && return 1
+		[ "$_mld_n" = "${_mld_if}_4" ] && _mld_key=$(printf '%s' "$_mld_st" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+	done
+	[ -n "$_mld_key" ] || _mld_key=-
+	# one lookup per connection: the cache is keyed by the address the modem gave
+	_mld_c="/tmp/5gmodem/mbimdns.$_mld_if"
+	if [ -s "$_mld_c" ]; then
+		read -r _mld_ck _mld_cv < "$_mld_c"
+		if [ "$_mld_ck" = "$_mld_key" ]; then
+			[ "$_mld_cv" = - ] && return 1
+			printf '%s' "$_mld_cv"
+			return 0
+		fi
+	fi
+	# the servers umbim printed while setting the link up: the last session of this interface
+	_mld_ns=$(logread 2>/dev/null | grep -F "netifd: $_mld_if (" \
+		| awk '/mbim\[[0-9]+\] Setting up/ { n = "" } /ipv[46]dnsserver:/ { n = n " " $NF } END { print n }')
+	if [ -z "$(printf '%s' "$_mld_ns" | tr -d ' ')" ]; then
+		# log rotated or disabled: ask the modem (the cdc-wdm node belongs to umbim, AT does not)
+		_mld_at=$(uci -q get "5gmodem.$(sec_for_iface "$_mld_if").at_port")
+		[ -n "$_mld_at" ] && _mld_ns=$(at_query "$_mld_at" 'AT+CGCONTRDP' 6 2>/dev/null \
+			| awk -F, -v ip="$_mld_key" '/^\+CGCONTRDP:/ {
+				gsub(/"/, ""); s = $6 " " $7
+				if (ip != "-" && index($4, ip ".") != 1) { if (any == "") any = s; next }
+				print s; found = 1; exit }
+				END { if (!found) print any }')
+	fi
+	_mld_v=$(for _mld_x in $_mld_ns; do
+		case "$_mld_x" in
+			0.0.0.0|*[!0-9.]*) ;;
+			*.*.*.*) printf '%s\n' "$_mld_x" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' && printf '%s\n' "$_mld_x" ;;
+		esac
+		case "$_mld_x" in
+			*:*) printf '%s\n' "$_mld_x" | grep -qE '^[0-9A-Fa-f:]+$' && [ "$_mld_x" != "::" ] && printf '%s\n' "$_mld_x" ;;
+		esac
+	done | awk '!seen[$0]++' | head -4 | tr '\n' ' ')
+	_mld_v=${_mld_v% }
+	mkdir -p /tmp/5gmodem
+	printf '%s %s\n' "$_mld_key" "${_mld_v:--}" > "$_mld_c"
+	[ -n "$_mld_v" ] || return 1
+	printf '%s' "$_mld_v"
+}
+
+# Puts the servers from mbim_lost_dns into resolv.conf.auto under "# Interface <iface>_4".
+# netifd rewrites that file on every interface event, so the watchdog calls this every round.
+mbim_dns_fix() {
+	[ -n "$1" ] || return 1
+	mkdir -p /tmp/5gmodem
+	# hotplug of <iface> and <iface>_4 and the watchdog round can come at once: one writer
+	( flock 8 || exit 1; _mbim_dns_fix_l "$1" ) 8>/tmp/5gmodem/mbimdns.lock
+}
+
+_mbim_dns_fix_l() {
+	_mdf_f=/tmp/resolv.conf.d/resolv.conf.auto
+	[ -f "$_mdf_f" ] || return 1
+	grep -qE "^# Interface $1(_[46])?\$" "$_mdf_f" && return 0
+	_mdf_ns=$(mbim_lost_dns "$1") || return 1
+	{ printf '# Interface %s_4\n' "$1"; printf 'nameserver %s\n' $_mdf_ns; } >> "$_mdf_f" 2>/dev/null || return 1
+	killall -HUP dnsmasq 2>/dev/null
+	_mdf_m="/tmp/5gmodem/mbimdns.$1.logged"
+	if [ "$(cat "$_mdf_m" 2>/dev/null)" != "$_mdf_ns" ]; then
+		logger -t 5gmodem "$1: mbim.sh of this firmware left the link without DNS - using the servers the modem reported: $_mdf_ns"
+		printf '%s' "$_mdf_ns" > "$_mdf_m"
+	fi
+	return 0
 }
 
 mm_ghost_bearer() {
@@ -855,7 +1017,12 @@ tty_send_if() {
 	[ -f "$_tpu_d/bInterfaceNumber" ] || _tpu_d=${_tpu_d%/*}
 	[ -f "$_tpu_d/bInterfaceNumber" ] || return 1
 	_tpu_u=${_tpu_d%/*}
-	case "$(cat "$_tpu_u/idVendor" 2>/dev/null):$(cat "$_tpu_u/idProduct" 2>/dev/null):$(cat "$_tpu_d/bInterfaceNumber" 2>/dev/null)" in
+	_tpu_v=""; _tpu_pp=""; _tpu_n=""
+	read -r _tpu_v 2>/dev/null < "$_tpu_u/idVendor"
+	[ "$_tpu_v" = 0e8d ] || return 1
+	read -r _tpu_pp 2>/dev/null < "$_tpu_u/idProduct"
+	read -r _tpu_n 2>/dev/null < "$_tpu_d/bInterfaceNumber"
+	case "$_tpu_v:$_tpu_pp:$_tpu_n" in
 		0e8d:7127:06) _TPU_P=${_tpu_u##*/}; return 0 ;;
 	esac
 	return 1
@@ -970,7 +1137,8 @@ alias_for_path() {
 tty_usbpath() {
 	[ -n "$1" ] || return 1
 	case "${1##*/}" in ttyMTK*) echo ccci; return 0 ;; esac
-	_tp=$(readlink -f "/sys/class/wwan/$(basename "$1")/device" 2>/dev/null)
+	_tp=""
+	[ -e "/sys/class/wwan/${1##*/}" ] && _tp=$(readlink -f "/sys/class/wwan/${1##*/}/device" 2>/dev/null)
 	if [ -n "$_tp" ]; then
 		while [ -n "$_tp" ] && [ "$_tp" != /sys ]; do
 			if [ -d "$_tp/remoteproc" ] || [ -e "/sys/bus/pci/devices/${_tp##*/}" ]; then
@@ -980,7 +1148,7 @@ tty_usbpath() {
 			_tp=${_tp%/*}
 		done
 	fi
-	_tp=$(readlink -f "/sys/class/tty/$(basename "$1")/device" 2>/dev/null) || return 1
+	_tp=$(readlink -f "/sys/class/tty/${1##*/}/device" 2>/dev/null) || return 1
 	[ -n "$_tp" ] || return 1
 	_tp=${_tp%/*}
 	_tp=${_tp##*/}
@@ -1119,7 +1287,8 @@ qmicli_p() {
 		_qp_w=20; [ -n "$_qp_direct" ] && _qp_w=6
 		qmicli -d "$_qp_dev" -p $_qp_mb "$@" > "$_qp_o" 2>/dev/null 7>&- 8>&- 9>&- &
 		_qp_pid=$!
-		( exec >/dev/null 2>&1 7>&- 8>&- 9>&-; sleep "$_qp_w"; kill -9 "$_qp_pid" 2>/dev/null ) </dev/null &
+		( exec >/dev/null 2>&1 7>&- 8>&- 9>&-; sleep "$_qp_w" & _qp_s=$!
+		  trap 'kill $_qp_s 2>/dev/null; exit' TERM; wait $_qp_s; kill -9 "$_qp_pid" 2>/dev/null ) </dev/null &
 		_qp_k=$!
 		sleep_tick_init
 		_qp_i=0; _qp_max=$(( (_qp_w + 1) * _TICKS_PER_SEC ))
@@ -1137,7 +1306,8 @@ qmicli_p() {
 	if [ ! -s "$_qp_o" ] && [ -n "$_qp_direct" ] && qmi_channel_free; then
 		qmicli -d "$_qp_dev" $_qp_mb "$@" > "$_qp_o" 2>/dev/null 7>&- 8>&- 9>&- &
 		_qp_pid=$!
-		( exec >/dev/null 2>&1 7>&- 8>&- 9>&-; sleep 20; kill -9 "$_qp_pid" 2>/dev/null ) </dev/null &
+		( exec >/dev/null 2>&1 7>&- 8>&- 9>&-; sleep 20 & _qp_s=$!
+		  trap 'kill $_qp_s 2>/dev/null; exit' TERM; wait $_qp_s; kill -9 "$_qp_pid" 2>/dev/null ) </dev/null &
 		_qp_k=$!
 		sleep_tick_init
 		_qp_i=0; _qp_max2=$(( 21 * _TICKS_PER_SEC ))
@@ -1221,6 +1391,8 @@ sleep_tick_init() {
 	fi
 }
 
+# AT_QUERY_RAW=1: the whole exchange with the final OK / ERROR line (sms_tool -D); without it
+# sms_tool prints the echo and the data lines only, so success cannot be told from failure
 at_query() {
 	_aq_p="$1"; _aq_c="$2"; _aq_t="${3:-8}"
 	[ -n "$_aq_p" ] && [ -c "$_aq_p" ] || return 1
@@ -1238,7 +1410,7 @@ at_query() {
 
 	_aq_mine=0
 	if command -v at_lock >/dev/null 2>&1 \
-	   && [ "$_AT_LOCK_HELD" != "$(basename "$_aq_p")" ]; then
+	   && [ "$_AT_LOCK_HELD" != "${_aq_p##*/}" ]; then
 		if at_lock "$_aq_p" "${4:-10}" 2>/dev/null; then
 			_aq_mine=1
 		else
@@ -1249,24 +1421,27 @@ at_query() {
 	_aq_o=$(mktemp /tmp/5gmodem/atq.XXXXXX 2>/dev/null) || _aq_o="/tmp/5gmodem/atq.$$.$(date +%s)"
 	sleep_tick_init
 	if [ "$_TICKS_PER_SEC" = 1 ]; then
-		{
-			( sleep "$_aq_t" </dev/null & _aq_x=$!; trap 'kill $_aq_x; exit' TERM; wait $_aq_x; echo t ) &
+		(
+			# Ash saves temporary redirections on descriptors its forked shells can inherit.
+			exec 7>&- 8>&- 9>&-
+			( sms_tool ${AT_QUERY_RAW:+-D} -d "$_aq_p" at "$_aq_c" > "$_aq_o" 2>/dev/null </dev/null & _aq_x=$!
+			  trap 'kill "$_aq_x" 2>/dev/null; exit' TERM; wait "$_aq_x"; echo d ) &
+			_aq_child=$!
+			( sleep "$_aq_t" </dev/null & _aq_x=$!; trap 'kill "$_aq_x" 2>/dev/null; exit' TERM
+			  wait "$_aq_x"; kill "$_aq_child" 2>/dev/null; echo t ) &
 			echo $! > "$_aq_o.s"
-			( sms_tool -d "$_aq_p" at "$_aq_c" > "$_aq_o" 2>/dev/null </dev/null & _aq_x=$!
-			  trap 'kill $_aq_x; exit' TERM; wait $_aq_x; echo d ) &
-			echo $! > "$_aq_o.p"
-		} 2>/dev/null 7>&- 8>&- 9>&- | read -r _aq_r
-		kill "$(cat "$_aq_o.s" 2>/dev/null)" 2>/dev/null
-		_aq_pid=$(cat "$_aq_o.p" 2>/dev/null)
-		[ -n "$_aq_pid" ] && kill -0 "$_aq_pid" 2>/dev/null && kill "$_aq_pid" 2>/dev/null
-		rm -f "$_aq_o.s" "$_aq_o.p"
+		) 2>/dev/null | ( exec 7>&- 8>&- 9>&-; read -r _aq_r )
+		_aq_timer=$(cat "$_aq_o.s" 2>/dev/null)
+		[ -z "$_aq_timer" ] || kill "$_aq_timer" 2>/dev/null
+		rm -f "$_aq_o.s"
 	else
-		sms_tool -d "$_aq_p" at "$_aq_c" > "$_aq_o" 2>/dev/null 7>&- 8>&- 9>&- &
+		sms_tool ${AT_QUERY_RAW:+-D} -d "$_aq_p" at "$_aq_c" > "$_aq_o" 2>/dev/null </dev/null 7>&- 8>&- 9>&- &
 		_aq_pid=$!
-		( exec >/dev/null 2>&1 8>&- 9>&-; sleep "$_aq_t"; kill "$_aq_pid" 2>/dev/null ) </dev/null & _aq_w=$!
+		( exec >/dev/null 2>&1 7>&- 8>&- 9>&-; sleep "$_aq_t" & _aq_s=$!
+		  trap 'kill "$_aq_s" 2>/dev/null; exit' TERM; wait "$_aq_s"; kill "$_aq_pid" 2>/dev/null ) </dev/null & _aq_w=$!
 		_aq_i=0; _aq_max=$(( (${_aq_t:-8} + 1) * _TICKS_PER_SEC ))
 		while kill -0 "$_aq_pid" 2>/dev/null && [ "$_aq_i" -lt "$_aq_max" ]; do
-			_aq_i=$((_aq_i + 1)); sleep "$_SLEEP_TICK"
+			_aq_i=$((_aq_i + 1)); sleep "$_SLEEP_TICK" 7>&- 8>&- 9>&-
 		done
 		kill -0 "$_aq_pid" 2>/dev/null || wait "$_aq_pid" 2>/dev/null
 		if kill -0 "$_aq_pid" 2>/dev/null; then
@@ -1413,8 +1588,14 @@ set_sms_storage() {
 	return 0
 }
 
+# curl config line: value in double quotes with \ and " escaped (for "curl -K -": keeps secrets out of argv)
+curl_kq() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# The local HTTP proxy port of clash/mihomo: the mixed-port or port written in its config.yaml,
+# else what the running core reports. Only when the core has no HTTP port at all and does not
+# accept LAN clients (allow-lan false) a mixed port is opened through its API until it restarts.
 net_proxy_port() {
-	_np_p=$(sed -n 's/^\(mixed-port\|port\) *: *\([0-9]*\).*/\2/p' \
+	_np_p=$(sed -n 's/^ *\(mixed-port\|port\) *: *\([0-9]*\).*/\2/p' \
 		/opt/clash/config.yaml /etc/clash/config.yaml 2>/dev/null | head -1)
 	case "$_np_p" in ''|0) ;; *) printf '%s' "$_np_p"; return 0 ;; esac
 	command -v curl >/dev/null 2>&1 || return 1
@@ -1422,19 +1603,23 @@ net_proxy_port() {
 		/opt/clash/config.yaml /etc/clash/config.yaml 2>/dev/null | head -1)
 	_np_capi() {
 		if [ -n "$_np_s" ]; then
-			curl -s -m 3 -H "Authorization: Bearer $_np_s" "$@" 2>/dev/null
+			printf 'header = "Authorization: Bearer %s"\n' "$(curl_kq "$_np_s")" | curl -s -m 3 -K - "$@" 2>/dev/null
 		else
 			curl -s -m 3 "$@" 2>/dev/null
 		fi
 	}
-	_np_r=$(_np_capi "http://127.0.0.1:9090/configs" | jsonfilter -e '@["mixed-port"]' 2>/dev/null)
-	case "$_np_r" in ''|*[!0-9]*) return 1 ;; esac
-	if [ "$_np_r" = "0" ]; then
-		_np_capi -X PATCH "http://127.0.0.1:9090/configs" -d '{"mixed-port":7895}' -o /dev/null || return 1
-		_np_r=7895
-		logger -t 5gmodem "net: direct path is blocked - opened clash mixed-port 7895 (local API, 127.0.0.1 only)"
-	fi
-	printf '%s' "$_np_r"
+	_np_j=$(_np_capi "http://127.0.0.1:9090/configs")
+	for _np_k in mixed-port port; do
+		_np_r=$(printf '%s' "$_np_j" | jsonfilter -e "@[\"$_np_k\"]" 2>/dev/null)
+		case "$_np_r" in ''|0|*[!0-9]*) ;; *) printf '%s' "$_np_r"; return 0 ;; esac
+	done
+	# no HTTP port anywhere; the API answered at all?
+	[ -n "$(printf '%s' "$_np_j" | jsonfilter -e '@["mixed-port"]' 2>/dev/null)" ] || return 1
+	# never open a port the LAN could use as an open proxy
+	[ "$(printf '%s' "$_np_j" | jsonfilter -e '@["allow-lan"]' 2>/dev/null)" = false ] || return 1
+	_np_capi -X PATCH "http://127.0.0.1:9090/configs" -d '{"mixed-port":7895}' -o /dev/null || return 1
+	logger -t 5gmodem "net: direct path is blocked and clash has no HTTP port in its config - opened mixed-port 7895 (allow-lan is off: 127.0.0.1 only, until clash restarts)"
+	printf '7895'
 }
 
 # Ways around a blocked direct path, best first, one curl option set per line:
@@ -1475,38 +1660,66 @@ net_alt_paths() {
 	done
 }
 
+# wget (uclient-fetch) with a hard limit: its --timeout covers reads only, and a connection that
+# never opens (a whitelist link that drops packets) kept it, and the caller, waiting for good.
+_nf_wget() {
+	_nw_t="$1"; shift
+	wget "$@" &
+	_nw_p=$!
+	( sleep "$_nw_t"; kill "$_nw_p" ) >/dev/null 2>&1 </dev/null &
+	_nw_k=$!
+	wait "$_nw_p"; _nw_rc=$?
+	kill "$_nw_k" 2>/dev/null
+	return $_nw_rc
+}
+
 net_fetch() {
-	_nf_t="$1"; _nf_u="$2"; _nf_o="$3"
+	# $4: one optional request header, e.g. "Accept: application/octet-stream"
+	_nf_t="$1"; _nf_u="$2"; _nf_o="$3"; _nf_h="$4"
+	# a device the owner picked for downloads (GitHub blocked on the default uplink) goes first;
+	# binding to a device needs curl, wget cannot do it
+	_nf_d=$(uci -q get 5gmodem.@5gmodem[0].fetch_dev)
+	case "$_nf_d" in *[!A-Za-z0-9._@-]*) _nf_d="" ;; esac
+	if [ -n "$_nf_d" ] && [ -d "/sys/class/net/$_nf_d" ] && command -v curl >/dev/null 2>&1; then
+		if [ -n "$_nf_o" ]; then
+			curl -fsSL --connect-timeout 8 -m "$_nf_t" --interface "$_nf_d" ${_nf_h:+-H} ${_nf_h:+"$_nf_h"} -o "$_nf_o" "$_nf_u" 2>/dev/null && [ -s "$_nf_o" ] && return 0
+			rm -f "$_nf_o" 2>/dev/null
+		else
+			_nf_b=$(curl -fsSL --connect-timeout 8 -m "$_nf_t" --interface "$_nf_d" ${_nf_h:+-H} ${_nf_h:+"$_nf_h"} "$_nf_u" 2>/dev/null)
+			[ -n "$_nf_b" ] && { printf '%s' "$_nf_b"; return 0; }
+		fi
+		logger -t 5gmodem "net: fetch through $_nf_d failed - trying the default route"
+	fi
 	if [ -n "$_nf_o" ]; then
-		wget -qO "$_nf_o" --timeout="$_nf_t" "$_nf_u" 2>/dev/null && [ -s "$_nf_o" ] && return 0
+		_nf_wget $((_nf_t + 20)) -qO "$_nf_o" ${_nf_h:+"--header=$_nf_h"} --timeout="$_nf_t" "$_nf_u" 2>/dev/null && [ -s "$_nf_o" ] && return 0
 		rm -f "$_nf_o" 2>/dev/null
 	else
-		_nf_b=$(wget -qO- --timeout="$_nf_t" "$_nf_u" 2>/dev/null)
+		_nf_b=$(_nf_wget $((_nf_t + 20)) -qO- ${_nf_h:+"--header=$_nf_h"} --timeout="$_nf_t" "$_nf_u" 2>/dev/null)
 		[ -n "$_nf_b" ] && { printf '%s' "$_nf_b"; return 0; }
 	fi
 	if ! command -v curl >/dev/null 2>&1; then
 		_nf_p=$(net_proxy_port) && [ -n "$_nf_p" ] || return 1
 		logger -t 5gmodem "net: direct fetch failed - retrying via local proxy 127.0.0.1:$_nf_p"
 		if [ -n "$_nf_o" ]; then
-			http_proxy="http://127.0.0.1:$_nf_p" https_proxy="http://127.0.0.1:$_nf_p" \
-				wget -qO "$_nf_o" --timeout="$_nf_t" "$_nf_u" 2>/dev/null && [ -s "$_nf_o" ] && return 0
+			( export http_proxy="http://127.0.0.1:$_nf_p" https_proxy="http://127.0.0.1:$_nf_p"
+			  _nf_wget $((_nf_t + 20)) -qO "$_nf_o" ${_nf_h:+"--header=$_nf_h"} --timeout="$_nf_t" "$_nf_u" 2>/dev/null ) && [ -s "$_nf_o" ] && return 0
 			rm -f "$_nf_o" 2>/dev/null; return 1
 		fi
-		_nf_b=$(http_proxy="http://127.0.0.1:$_nf_p" https_proxy="http://127.0.0.1:$_nf_p" \
-			wget -qO- --timeout="$_nf_t" "$_nf_u" 2>/dev/null)
+		_nf_b=$(export http_proxy="http://127.0.0.1:$_nf_p" https_proxy="http://127.0.0.1:$_nf_p"
+			_nf_wget $((_nf_t + 20)) -qO- ${_nf_h:+"--header=$_nf_h"} --timeout="$_nf_t" "$_nf_u" 2>/dev/null)
 		[ -n "$_nf_b" ] && { printf '%s' "$_nf_b"; return 0; }
 		return 1
 	fi
 	net_alt_paths | {
 		while read -r _nf_a; do
 			# a one-byte probe, so a dead path costs seconds and not the whole timeout
-			curl -fsSL --connect-timeout 4 -m 8 -r 0-0 -o /dev/null $_nf_a "$_nf_u" 2>/dev/null || continue
+			curl -fsSL --connect-timeout 4 -m 8 -r 0-0 -o /dev/null $_nf_a ${_nf_h:+-H} ${_nf_h:+"$_nf_h"} "$_nf_u" 2>/dev/null || continue
 			logger -t 5gmodem "net: direct fetch failed - using $_nf_a"
 			if [ -n "$_nf_o" ]; then
-				curl -fsSL -m "$_nf_t" $_nf_a -o "$_nf_o" "$_nf_u" 2>/dev/null && [ -s "$_nf_o" ] && exit 0
+				curl -fsSL -m "$_nf_t" $_nf_a ${_nf_h:+-H} ${_nf_h:+"$_nf_h"} -o "$_nf_o" "$_nf_u" 2>/dev/null && [ -s "$_nf_o" ] && exit 0
 				rm -f "$_nf_o" 2>/dev/null
 			else
-				_nf_b=$(curl -fsSL -m "$_nf_t" $_nf_a "$_nf_u" 2>/dev/null)
+				_nf_b=$(curl -fsSL -m "$_nf_t" $_nf_a ${_nf_h:+-H} ${_nf_h:+"$_nf_h"} "$_nf_u" 2>/dev/null)
 				[ -n "$_nf_b" ] && { printf '%s' "$_nf_b"; exit 0; }
 			fi
 		done
@@ -1662,49 +1875,5 @@ xmm_other_at() {
 	return 1
 }
 
-# Primary uplink = the IPv4 default route with the lowest metric in the main
-# table. When it differs from the last one seen, fire
-#   ACTION=primary INTERFACE DEVICE PREVIOUS PREVIOUS_DEVICE REASON
-#   /sbin/hotplug-call 5gmodem-uplink   (and ubus event 5gmodem.uplink)
-# in the background. Contract: docs/subsystems/internet-priority.md#primary-uplink-event
-# $1 = reason (netpri, health, iface)
-uplink_notify() {
-	[ -x /sbin/hotplug-call ] || return 0
-	mkdir -p /tmp/5gmodem 2>/dev/null
-	(
-		exec 5>/tmp/5gmodem/uplink.lock 2>/dev/null || exit 0
-		flock 5
-		_un_dev=$(ip -4 route show default 2>/dev/null | awk '
-			$1 == "default" && $2 != "from" {
-				m = 0; d = ""
-				for (i = 2; i < NF; i++) { if ($i == "dev") d = $(i + 1); if ($i == "metric") m = $(i + 1) + 0 }
-				if (d != "" && (b == "" || m < bm)) { bm = m; b = d }
-			}
-			END { print b }')
-		_un_if=""
-		if [ -n "$_un_dev" ]; then
-			_un_dump=$(ubus call network.interface dump 2>/dev/null)
-			for _un_c in $(printf '%s' "$_un_dump" | jsonfilter \
-					-e "@.interface[@.l3_device=\"$_un_dev\"].interface" 2>/dev/null); do
-				[ -n "$(printf '%s' "$_un_dump" | jsonfilter \
-					-e "@.interface[@.interface=\"$_un_c\"][\"ipv4-address\"][0].address" 2>/dev/null)" ] \
-					&& { _un_if="$_un_c"; break; }
-				[ -n "$_un_if" ] || _un_if="$_un_c"
-			done
-			[ -n "$_un_if" ] || _un_if="$_un_dev"
-		fi
-		_un_prev=""; _un_pdev=""
-		[ -f /tmp/5gmodem/uplink.primary ] && read -r _un_prev _un_pdev < /tmp/5gmodem/uplink.primary
-		[ "$_un_if" = "$_un_prev" ] && [ "$_un_dev" = "$_un_pdev" ] && exit 0
-		echo "$_un_if $_un_dev" > /tmp/5gmodem/uplink.primary
-		logger -t 5gmodem "uplink: primary ${_un_prev:-none} -> ${_un_if:-none} (${1:-unknown})"
-		(
-			exec 5>&- 6>&- 7>&- 8>&- 9>&-
-			unset _AT_LOCK_HELD
-			ACTION=primary INTERFACE="$_un_if" DEVICE="$_un_dev" \
-			PREVIOUS="$_un_prev" PREVIOUS_DEVICE="$_un_pdev" REASON="${1:-unknown}" \
-				/sbin/hotplug-call 5gmodem-uplink
-			ubus send 5gmodem.uplink "{\"action\":\"primary\",\"interface\":\"$_un_if\",\"device\":\"$_un_dev\",\"previous\":\"$_un_prev\",\"previous_device\":\"$_un_pdev\",\"reason\":\"${1:-unknown}\"}"
-		) >/dev/null 2>&1 </dev/null &
-	) >/dev/null 2>&1 </dev/null
-}
+# uplink_notify lives in uplink.sh so the iface hotplug can load it alone
+if [ -f /usr/share/5gmodem/uplink.sh ]; then . /usr/share/5gmodem/uplink.sh; fi

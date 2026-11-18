@@ -41,9 +41,36 @@ _addr_for() {
 
 _sess_file() { echo "$CACHE_DIR/hilink_$(printf '%s_%s' "$1" "$2" | tr -c 'A-Za-z0-9' '_')"; }
 
+# Session files of ZTE/Tenda/ASR sticks: address plus modem path, like _sess_file. Two sticks on the same
+# default address (192.168.0.1) behind different interfaces no longer share one login. An empty path is the
+# active modem's, as everywhere here, so callers with and without a path share the same file.
+_sk() { _skp=$(_hl_path "$2"); printf '%s%s' "$1" "${_skp:+_$_skp}" | tr -c 'A-Za-z0-9' '_'; }
+
+# Address, netdev and source address of one modem. metrics_json and hl_ussd resolve them once in their own shell
+# (_HC_K marks for which path); api_get then skips three uci reads and two ip calls per request.
+_hl_ctx() {
+	[ "$_HC_K" = "p:$1" ] && return 0
+	_HC_K=""
+	_HC_A=$(_addr_for "$1") || return 1
+	_HC_D=$(_netdev_for "$1") || return 1
+	_HC_S=$(_srcip_for "$1" "$_HC_A"); [ -n "$_HC_S" ] || _HC_S="$_HC_D"
+	_HC_K="p:$1"
+}
+
+# Source address for a request to $1 (modem address) on behalf of modem $2. Without $2 it is the active modem's,
+# as before; with $2 a second web-API modem is no longer queried through the active one's interface.
+_hl_src() {
+	if [ -n "$2" ] && [ "$_HC_K" = "p:$2" ] && [ "$_HC_A" = "$1" ]; then
+		[ "$_HC_S" = "$_HC_D" ] || printf '%s' "$_HC_S"
+		return 0
+	fi
+	_srcip_for "$2" "$1"
+}
+
+# $4: source address already resolved by the caller.
 _sess_new() {
 	_a="$1"; _d="$2"
-	_src=$(_srcip_for "$3" "$_a"); [ -n "$_src" ] || _src="$_d"
+	_src="$4"; [ -n "$_src" ] || _src=$(_srcip_for "$3" "$_a"); [ -n "$_src" ] || _src="$_d"
 	_old_sid=$(cut -f1 "$(_sess_file "$_a" "$3")" 2>/dev/null)
 	_r=$(curl -s --max-time 6 --interface "$_src" -A "$UA" \
 		-H "Cookie: $_old_sid" "http://$_a/api/webserver/SesTokInfo" 2>/dev/null)
@@ -61,22 +88,25 @@ _sess_get() {
 		cat "$_f"
 		return 0
 	fi
-	_sess_new "$1" "$2" "$3"
+	_sess_new "$1" "$2" "$3" "$4"
 }
 
 api_get() {
 	_ep="$1"
-	_a=$(_addr_for "$2") || return 1
-	_d=$(_netdev_for "$2") || return 1
-	_s=$(_sess_get "$_a" "$_d" "$2") || return 1
+	_hl_ctx "$2" || return 1
+	_a="$_HC_A"; _d="$_HC_D"; _src="$_HC_S"
+	_s=$(_sess_get "$_a" "$_d" "$2" "$_src") || return 1
 	_sid=$(printf '%s' "$_s" | cut -f1); _tok=$(printf '%s' "$_s" | cut -f2)
-	_src=$(_srcip_for "$2" "$_a"); [ -n "$_src" ] || _src="$_d"
 	_out=$(curl -s --max-time 6 --interface "$_src" -A "$UA" \
 		-H "Cookie: $_sid" -H "__RequestVerificationToken: $_tok" \
 		"http://$_a$_ep" 2>/dev/null)
+	_rc=$?
+	# An empty body is a stale session on some firmwares, but not when nothing answered at all (7: no connection,
+	# 28: timeout): a second session request and retry would only add up to 12 s on a hung or rebooting stick.
+	case "$_rc:$_out" in 7:|28:) return 1 ;; esac
 	case "$_out" in
 		''|*'<code>125002</code>'*|*'<code>125003</code>'*|*'<code>125001</code>'*)
-			_s=$(_sess_new "$_a" "$_d" "$2") || return 1
+			_s=$(_sess_new "$_a" "$_d" "$2" "$_src") || return 1
 			_sid=$(printf '%s' "$_s" | cut -f1); _tok=$(printf '%s' "$_s" | cut -f2)
 			_out=$(curl -s --max-time 6 --interface "$_src" -A "$UA" \
 				-H "Cookie: $_sid" -H "__RequestVerificationToken: $_tok" \
@@ -240,17 +270,20 @@ _human() {
 conn_up() { [ "$1" = "901" ]; }
 
 _web_opt() {
-	_wo=$(uci -q get "$CFG.m_$(echo "${1:-$(uci -q get "$CFG.@5gmodem[0].active_modem")}" \
-		| sed 's/[^A-Za-z0-9]/_/g').$2")
-	printf '%s' "${_wo:-admin}"
+	local section="$CFG.m_$(_hl_path "$1" | sed 's/[^A-Za-z0-9]/_/g')" value
+	if [ "$2" = web_pass ] && [ "$(uci -q get "$section.web_pass_empty")" = 1 ]; then
+		return 0
+	fi
+	value=$(uci -q get "$section.$2") || value=''
+	printf '%s' "${value:-admin}"
 }
 
 _web_user() { _web_opt "$1" web_user; }
 _web_pass() { _web_opt "$1" web_pass; }
 
 _web_set() {
-	uci -q get "$CFG.m_$(echo "${1:-$(uci -q get "$CFG.@5gmodem[0].active_modem")}" \
-		| sed 's/[^A-Za-z0-9]/_/g').web_pass" >/dev/null
+	local section="$CFG.m_$(_hl_path "$1" | sed 's/[^A-Za-z0-9]/_/g')"
+	[ "$(uci -q get "$section.web_pass_empty")" = 1 ] || uci -q get "$section.web_pass" >/dev/null
 }
 
 _zte_pass() { _web_pass "$1"; }
@@ -261,23 +294,33 @@ _zte_b64() {
 	printf '%s' "$1"
 }
 
+# $2: modem path, so that the web password is the one of this modem and not of the active one.
 _zte_login() {
-	_zl_f="$CACHE_DIR/ztestok_$(echo "$1" | tr -c 'A-Za-z0-9' '_')"
-	if [ -s "$_zl_f" ] && [ -z "$(find "$_zl_f" -mmin +5 2>/dev/null)" ]; then
+	_zl_f="$CACHE_DIR/ztestok_$(_sk "$1" "$2")"
+	# "-" = the firmware keeps the session per client IP and sets no stok cookie
+	# (ZX297520 clones, "Demo-Webs"); it can expire sooner, so it is re-checked every minute.
+	_zl_age=5; [ "$(cat "$_zl_f" 2>/dev/null)" = "-" ] && _zl_age=1
+	if [ -s "$_zl_f" ] && [ -z "$(find "$_zl_f" -mmin +$_zl_age 2>/dev/null)" ]; then
 		cat "$_zl_f"; return 0
 	fi
 	_zl_bad="$_zl_f.fail"
 	if [ -f "$_zl_bad" ] && [ -z "$(find "$_zl_bad" -mmin +15 2>/dev/null)" ]; then
 		return 1
 	fi
-	_zl_src=$(_srcip_for "" "$1")
+	_zl_src=$(_hl_src "$1" "$2")
 	_zl_h=$(curl -s -i --max-time 8 ${_zl_src:+--interface "$_zl_src"} -A "$UA" \
 		-H "Referer: http://$1/index.html" \
 		-H "X-Requested-With: XMLHttpRequest" \
 		-H "Content-Type: application/x-www-form-urlencoded" \
-		-d "isTest=false&goformId=LOGIN&password=$(_zte_b64 "$(_zte_pass)")" \
-		"http://$1/$(_zte_setpath "$1")" 2>/dev/null)
+		-d "isTest=false&goformId=LOGIN&password=$(_zte_b64 "$(_zte_pass "$2")")" \
+		"http://$1/$(_zte_setpath "$1" "$2")" 2>/dev/null)
 	_zl_t=$(printf '%s' "$_zl_h" | sed -n 's/.*[Ss]et-[Cc]ookie: *stok=\([^;[:space:]]*\).*/\1/p' | head -1)
+	if [ -z "$_zl_t" ]; then
+		case "$_zl_h" in *'"result":"0"'*|*'"result":"4"'*) _zl_t="-" ;; esac
+	fi
+	# no HTTP answer at all (stick rebooting, web server stuck) is not a wrong password:
+	# no 15-minute back-off, or the levels would stay hidden long after the stick is back
+	[ -n "$_zl_t" ] || [ -n "$_zl_h" ] || return 1
 	if [ -n "$_zl_t" ]; then
 		rm -f "$_zl_bad"
 		printf '%s' "$_zl_t" > "$_zl_f"
@@ -289,12 +332,13 @@ _zte_login() {
 	return 1
 }
 
+# $2 (optional, also for the helpers below): modem path, picks the interface the request goes out of.
 _zte_paths() {
-	_zp_f="$CACHE_DIR/ztepath_$(echo "$1" | tr -c 'A-Za-z0-9' '_')"
+	_zp_f="$CACHE_DIR/ztepath_$(_sk "$1" "$2")"
 	if [ -s "$_zp_f" ] && [ -z "$(find "$_zp_f" -mmin +30 2>/dev/null)" ]; then
 		cat "$_zp_f"; return 0
 	fi
-	_zp_src=$(_srcip_for "" "$1")
+	_zp_src=$(_hl_src "$1" "$2")
 	for _zp_b in "goform/goform_get_cmd_process goform/goform_set_cmd_process" "reqproc/proc_get reqproc/proc_post"; do
 		_zp_r=$(curl -s --max-time 5 ${_zp_src:+--interface "$_zp_src"} -A "$UA" \
 			-H "Referer: http://$1/index.html" \
@@ -307,30 +351,32 @@ _zte_paths() {
 	printf 'goform/goform_get_cmd_process goform/goform_set_cmd_process'
 }
 
-_zte_getpath() { _zgp=$(_zte_paths "$1"); printf '%s' "${_zgp%% *}"; }
-_zte_setpath() { _zsp=$(_zte_paths "$1"); printf '%s' "${_zsp##* }"; }
+_zte_getpath() { _zgp=$(_zte_paths "$1" "$2"); printf '%s' "${_zgp%% *}"; }
+_zte_setpath() { _zsp=$(_zte_paths "$1" "$2"); printf '%s' "${_zsp##* }"; }
 
 _zte_get() {
-	_zg_src=$(_srcip_for "" "$1")
-	_zg_tok=$(cat "$CACHE_DIR/ztestok_$(echo "$1" | tr -c 'A-Za-z0-9' '_')" 2>/dev/null)
+	_zg_src=$(_hl_src "$1" "$3")
+	_zg_tok=$(cat "$CACHE_DIR/ztestok_$(_sk "$1" "$3")" 2>/dev/null)
+	[ "$_zg_tok" = "-" ] && _zg_tok=""
 	_zg_md='multi_data=1&'
 	case "${2%%&*}" in sms_data_total) _zg_md= ;; esac
+	case "$2" in *'&nomd') _zg_md=; set -- "$1" "${2%&nomd}" "$3" ;; esac
 	curl -s --max-time 6 ${_zg_src:+--interface "$_zg_src"} -A "$UA" \
 		-H "Referer: http://$1/index.html" \
 		-H "X-Requested-With: XMLHttpRequest" \
 		${_zg_tok:+-b "stok=$_zg_tok"} \
-		"http://$1/$(_zte_getpath "$1")?isTest=false&${_zg_md}cmd=$2" 2>/dev/null
+		"http://$1/$(_zte_getpath "$1" "$3")?isTest=false&${_zg_md}cmd=$2" 2>/dev/null
 }
 
 _zte_set() {
-	_zs_src=$(_srcip_for "" "$1")
+	_zs_src=$(_hl_src "$1" "$4")
 	curl -s --max-time 8 ${_zs_src:+--interface "$_zs_src"} -A "$UA" \
 		${3:+-b "$3" -c "$3"} \
 		-H "Referer: http://$1/index.html" \
 		-H "X-Requested-With: XMLHttpRequest" \
 		-H "Content-Type: application/x-www-form-urlencoded" \
 		-d "isTest=false&$2" \
-		"http://$1/$(_zte_setpath "$1")" 2>/dev/null
+		"http://$1/$(_zte_setpath "$1" "$4")" 2>/dev/null
 }
 
 _zj() { printf '%s' "$1" | jsonfilter -e "@.$2" 2>/dev/null; }
@@ -352,21 +398,22 @@ _api_vid() {
 
 _tk() { echo "$1" | tr -c 'A-Za-z0-9' '_'; }
 
+# $3 / $2 / $4: modem path, as in the ZTE helpers.
 _tenda_raw() {
-	_tr_src=$(_srcip_for "" "$1")
-	_tr_c=$(cat "$CACHE_DIR/tendaauth_$(_tk "$1")" 2>/dev/null)
+	_tr_src=$(_hl_src "$1" "$3")
+	_tr_c=$(cat "$CACHE_DIR/tendaauth_$(_sk "$1" "$3")" 2>/dev/null)
 	curl -s --max-time 6 ${_tr_src:+--interface "$_tr_src"} -A "$UA" \
 		${_tr_c:+-b "password=$_tr_c"} \
 		"http://$1/goform/getModules?modules=$2" 2>/dev/null
 }
 
 _tenda_on() {
-	_to_f="$CACHE_DIR/tendaapi_$(_tk "$1")"
+	_to_f="$CACHE_DIR/tendaapi_$(_sk "$1" "$2")"
 	if [ -f "$_to_f" ] && [ -z "$(find "$_to_f" -mmin +10 2>/dev/null)" ]; then
 		[ "$(cat "$_to_f")" = 1 ] && return 0
 		return 1
 	fi
-	_to_r=$(_tenda_raw "$1" deviceInfo)
+	_to_r=$(_tenda_raw "$1" deviceInfo "$2")
 	case "$_to_r" in
 		'') return 2 ;;
 		*'"deviceInfo"'*|*'"errCode":1000'*|*'"errCode":"1000"'*) printf '1' > "$_to_f"; return 0 ;;
@@ -376,13 +423,13 @@ _tenda_on() {
 }
 
 _tenda_login() {
-	_tl_f="$CACHE_DIR/tendaauth_$(_tk "$1")"
+	_tl_f="$CACHE_DIR/tendaauth_$(_sk "$1" "$2")"
 	_tl_bad="$_tl_f.fail"
 	if [ -f "$_tl_bad" ] && [ -z "$(find "$_tl_bad" -mmin +15 2>/dev/null)" ]; then
 		return 1
 	fi
 	_tl_p=$(_web_pass "$2")
-	_tl_src=$(_srcip_for "" "$1")
+	_tl_src=$(_hl_src "$1" "$2")
 	_tl_r=$(curl -s -i --max-time 8 ${_tl_src:+--interface "$_tl_src"} -A "$UA" \
 		-H "Content-Type: application/json; charset=UTF-8" \
 		-d "{\"userName\":\"$(_web_user "$2")\",\"password\":\"$(printf '%s' "$_tl_p" | md5sum | cut -d' ' -f1)\"}" \
@@ -409,17 +456,17 @@ _tenda_denied() {
 }
 
 _tenda_get() {
-	_tg_r=$(_tenda_raw "$1" "$2")
+	_tg_r=$(_tenda_raw "$1" "$2" "$3")
 	if _tenda_denied "$_tg_r"; then
-		rm -f "$CACHE_DIR/tendaauth_$(_tk "$1")"
-		_tenda_login "$1" "$3" >/dev/null && _tg_r=$(_tenda_raw "$1" "$2")
+		rm -f "$CACHE_DIR/tendaauth_$(_sk "$1" "$3")"
+		_tenda_login "$1" "$3" >/dev/null && _tg_r=$(_tenda_raw "$1" "$2" "$3")
 	fi
 	printf '%s' "$_tg_r"
 }
 
 _tenda_post() {
-	_tp_src=$(_srcip_for "" "$1")
-	_tp_c=$(cat "$CACHE_DIR/tendaauth_$(_tk "$1")" 2>/dev/null)
+	_tp_src=$(_hl_src "$1" "$4")
+	_tp_c=$(cat "$CACHE_DIR/tendaauth_$(_sk "$1" "$4")" 2>/dev/null)
 	curl -s --max-time 8 ${_tp_src:+--interface "$_tp_src"} -A "$UA" \
 		${_tp_c:+-b "password=$_tp_c"} \
 		-H "Content-Type: application/json; charset=UTF-8" \
@@ -427,11 +474,11 @@ _tenda_post() {
 }
 
 _tenda_set() {
-	_ts_r=$(_tenda_post "$1" "$2" "$3")
+	_ts_r=$(_tenda_post "$1" "$2" "$3" "$4")
 	case "$_ts_r" in *'"errCode"'*) ;; *) _ts_r="" ;; esac
 	if [ -z "$_ts_r" ] || _tenda_denied "$_ts_r"; then
-		rm -f "$CACHE_DIR/tendaauth_$(_tk "$1")"
-		_tenda_login "$1" "$4" >/dev/null && _ts_r=$(_tenda_post "$1" "$2" "$3")
+		rm -f "$CACHE_DIR/tendaauth_$(_sk "$1" "$4")"
+		_tenda_login "$1" "$4" >/dev/null && _ts_r=$(_tenda_post "$1" "$2" "$3" "$4")
 	fi
 	printf '%s' "$_ts_r"
 }
@@ -442,11 +489,12 @@ _tenda_ok() {
 }
 
 _is_tenda() {
-	_it_a=$(_addr_for "$(_hl_path "$1")") || return 1
-	_tenda_on "$_it_a"
+	_it_p=$(_hl_path "$1")
+	_it_a=$(_addr_for "$_it_p") || return 1
+	_tenda_on "$_it_a" "$_it_p"
 }
 
-_asr_ck() { echo "$CACHE_DIR/asrsid_$(_tk "$1")"; }
+_asr_ck() { echo "$CACHE_DIR/asrsid_$(_sk "$1" "$2")"; }
 
 _asr_md5() { printf '%s' "$1" | md5sum | cut -d' ' -f1; }
 
@@ -457,12 +505,12 @@ _asr_cnonce() {
 }
 
 _asr_hdr() {
-	read -r _ah_n _ah_nc < "$(_asr_ck "$1")" 2>/dev/null
+	read -r _ah_n _ah_nc < "$(_asr_ck "$1" "$3")" 2>/dev/null
 	case "$_ah_nc" in ''|*[!0-9]*) _ah_nc=1 ;; esac
-	printf '%s %s\n' "$_ah_n" $((_ah_nc + 1)) > "$(_asr_ck "$1")"
+	printf '%s %s\n' "$_ah_n" $((_ah_nc + 1)) > "$(_asr_ck "$1" "$3")"
 	_ah_nc=$(printf '%08x' "$_ah_nc")
 	_ah_cn=$(_asr_cnonce)
-	read -r _ah_u _ah_p < "$(_asr_ck "$1").who" 2>/dev/null
+	read -r _ah_u _ah_p < "$(_asr_ck "$1" "$3").who" 2>/dev/null
 	[ -n "$_ah_u" ] || { _ah_u=$(_web_user "$3"); _ah_p=$(_web_pass "$3"); }
 	_ah_h1=$(_asr_md5 "$_ah_u:Highwmg:$_ah_p")
 	_ah_r=$(_asr_md5 "$_ah_h1:$_ah_n:$_ah_nc:$_ah_cn:auth:$(_asr_md5 "$2:/cgi/xml_action.cgi")")
@@ -477,7 +525,7 @@ _asr_nonce() {
 }
 
 _asr_login() {
-	_al_bad="$(_asr_ck "$1").fail"
+	_al_bad="$(_asr_ck "$1" "$2").fail"
 	if [ -f "$_al_bad" ] && [ -z "$(find "$_al_bad" -mmin +15 2>/dev/null)" ]; then
 		return 1
 	fi
@@ -489,6 +537,8 @@ _asr_login() {
 admin admin
 admin zimifi"
 	fi
+	# Per address: a shared header file let a concurrent login (poll and SMS) read the other one's CGISID.
+	_al_hf="$(_asr_ck "$1" "$2").hdr"
 	printf '%s\n' "$_al_who" | while read -r _al_u _al_p; do
 		_al_h1=$(_asr_md5 "$_al_u:Highwmg:$_al_p")
 		for _al_v in "protected.cgi asr" "xml_action.cgi marvell"; do
@@ -497,20 +547,20 @@ admin zimifi"
 			_al_r=$(_asr_md5 "$_al_h1:$_al_n:00000001:$_al_cn:auth:$(_asr_md5 "GET:/cgi/${_al_v% *}")")
 			_al_cx=$(_asr_cnonce)
 			_al_rx=$(_asr_md5 "$_al_h1:$_al_n:00000001:$_al_cx:auth:$(_asr_md5 "GET:/cgi/xml_action.cgi")")
-			_al_b=$(curl -s -D "$CACHE_DIR/asrhdr" --max-time 8 ${_al_src:+--interface "$_al_src"} -A "$UA" \
+			_al_b=$(curl -s -D "$_al_hf" --max-time 8 ${_al_src:+--interface "$_al_src"} -A "$UA" \
 				-H "Authorization: Digest username=\"$_al_u\", realm=\"Highwmg\", nonce=\"$_al_n\", uri=\"/cgi/xml_action.cgi\", response=\"$_al_rx\", qop=auth, nc=00000001, cnonce=\"$_al_cx\"" \
 				-H "Cookie: CGISID=; projectConfig=0" -H "X-Requested-With: XMLHttpRequest" \
 				"http://$1/login.cgi?Action=Digest&username=$_al_u&realm=Highwmg&nonce=$_al_n&response=$_al_r&qop=auth&cnonce=$_al_cn&nc=00000001&temp=${_al_v#* }" 2>/dev/null)
-			_al_s=$(tr -d '\r' < "$CACHE_DIR/asrhdr" 2>/dev/null | sed -n 's/^[Ss]et-[Cc]ookie: *CGISID=\([^;[:space:]]*\).*/\1/p' | head -1)
-			rm -f "$CACHE_DIR/asrhdr"
+			_al_s=$(tr -d '\r' < "$_al_hf" 2>/dev/null | sed -n 's/^[Ss]et-[Cc]ookie: *CGISID=\([^;[:space:]]*\).*/\1/p' | head -1)
+			rm -f "$_al_hf"
 			case "$_al_b" in *'200 OK'*|*'first login'*) ;; *) [ -n "$_al_s" ] || continue ;; esac
 			rm -f "$_al_bad"
-			printf '%s 2\n' "$_al_n" > "$(_asr_ck "$1")"
-			printf '%s' "$_al_s" > "$(_asr_ck "$1").sid"
-			( umask 077; printf '%s %s\n' "$_al_u" "$_al_p" > "$(_asr_ck "$1").who" )
+			printf '%s 2\n' "$_al_n" > "$(_asr_ck "$1" "$2")"
+			printf '%s' "$_al_s" > "$(_asr_ck "$1" "$2").sid"
+			( umask 077; printf '%s %s\n' "$_al_u" "$_al_p" > "$(_asr_ck "$1" "$2").who" )
 			exit 0
 		done
-	done && [ -s "$(_asr_ck "$1")" ] && return 0
+	done && [ -s "$(_asr_ck "$1" "$2")" ] && return 0
 	[ -f "$_al_bad" ] || logger -t 5gmodem "hilink(asr): login to $1 failed - wrong web password? Not retrying for 15 minutes"
 	: > "$_al_bad"
 	return 1
@@ -518,7 +568,7 @@ admin zimifi"
 
 _asr_raw() {
 	_ar_src=$(_srcip_for "$5" "$1")
-	_ar_s=$(cat "$(_asr_ck "$1").sid" 2>/dev/null)
+	_ar_s=$(cat "$(_asr_ck "$1" "$5").sid" 2>/dev/null)
 	if [ "$2" = POST ]; then
 		curl -s --max-time 8 ${_ar_src:+--interface "$_ar_src"} -A "$UA" \
 			-H "Authorization: $(_asr_hdr "$1" POST "$5")" \
@@ -535,7 +585,7 @@ _asr_raw() {
 }
 
 _asr_api() {
-	[ -s "$(_asr_ck "$1")" ] || _asr_login "$1" "$5" || return 1
+	[ -s "$(_asr_ck "$1" "$5")" ] || _asr_login "$1" "$5" || return 1
 	_ap_src=$(_srcip_for "$5" "$1")
 	if [ "$2" = POST ]; then
 		curl -s --max-time 30 ${_ap_src:+--interface "$_ap_src"} -A "$UA" \
@@ -549,11 +599,11 @@ _asr_api() {
 }
 
 _asr_call() {
-	[ -s "$(_asr_ck "$1")" ] || _asr_login "$1" "$5" || return 1
+	[ -s "$(_asr_ck "$1" "$5")" ] || _asr_login "$1" "$5" || return 1
 	_ac_r=$(_asr_raw "$@")
 	case "$2:$_ac_r" in
 		GET:|*UNAUTHORIZED*|*KICKOFF*|*'<title>'*)
-			rm -f "$(_asr_ck "$1")" "$(_asr_ck "$1").who"
+			rm -f "$(_asr_ck "$1" "$5")" "$(_asr_ck "$1" "$5").who"
 			_asr_login "$1" "$5" || return 1
 			_ac_r=$(_asr_raw "$@") ;;
 	esac
@@ -568,7 +618,7 @@ _asr_smsx() {
 	printf '<?xml version="1.0" encoding="US-ASCII"?><RGW><message>%s</message></RGW>' "$1"
 }
 
-_asr_sms_map() { echo "$CACHE_DIR/asrsms_$(_tk "$1")"; }
+_asr_sms_map() { echo "$CACHE_DIR/asrsms_$(_sk "$1" "$2")"; }
 
 asr_sms_list() {
 	_al_p=$(_hl_path "$2")
@@ -577,7 +627,7 @@ asr_sms_list() {
 		out) _al_fl=GET_SENT_SMS_LOCAL; _al_tag=2; _al_off=100000 ;;
 		*)   _al_fl=GET_RCV_SMS_LOCAL;  _al_tag=1; _al_off=0 ;;
 	esac
-	_al_map=$(_asr_sms_map "$_al_a")
+	_al_map=$(_asr_sms_map "$_al_a" "$_al_p")
 	touch "$_al_map"
 	grep -v " ${1:-in}\$" "$_al_map" > "$_al_map.n" 2>/dev/null
 	_al_pg=1; _al_tot=1; _al_all=""
@@ -637,11 +687,11 @@ asr_sms_count() {
 }
 
 _asr_sms_raw() {
-	sed -n "s/^$2 \([^ ]*\) .*/\1/p" "$(_asr_sms_map "$1")" 2>/dev/null | head -1
+	sed -n "s/^$2 \([^ ]*\) .*/\1/p" "$(_asr_sms_map "$1" "$3")" 2>/dev/null | head -1
 }
 
 _asr_sms_box() {
-	case "$(sed -n "s/^$2 [^ ]* \(.*\)/\1/p" "$(_asr_sms_map "$1")" 2>/dev/null | head -1)" in
+	case "$(sed -n "s/^$2 [^ ]* \(.*\)/\1/p" "$(_asr_sms_map "$1" "$3")" 2>/dev/null | head -1)" in
 		out) echo "2" ;;
 		*) echo "12" ;;
 	esac
@@ -652,10 +702,10 @@ asr_sms_delete() {
 	_ad_a=$(_addr_for "$_ad_p") || { echo '{"success":false}'; return 1; }
 	_ad_ids=""; _ad_tags=12
 	for _ad_i in $(printf '%s' "$1" | tr -c '0-9' ' '); do
-		_ad_r=$(_asr_sms_raw "$_ad_a" "$_ad_i")
-		[ -n "$_ad_r" ] || { asr_sms_list in "$_ad_p" >/dev/null; asr_sms_list out "$_ad_p" >/dev/null; _ad_r=$(_asr_sms_raw "$_ad_a" "$_ad_i"); }
+		_ad_r=$(_asr_sms_raw "$_ad_a" "$_ad_i" "$_ad_p")
+		[ -n "$_ad_r" ] || { asr_sms_list in "$_ad_p" >/dev/null; asr_sms_list out "$_ad_p" >/dev/null; _ad_r=$(_asr_sms_raw "$_ad_a" "$_ad_i" "$_ad_p"); }
 		[ -n "$_ad_r" ] || continue
-		_ad_tags=$(_asr_sms_box "$_ad_a" "$_ad_i")
+		_ad_tags=$(_asr_sms_box "$_ad_a" "$_ad_i" "$_ad_p")
 		_ad_ids="$_ad_ids$_ad_r,"
 	done
 	[ -n "$_ad_ids" ] || { echo '{"success":false,"error":"not found"}'; return 1; }
@@ -667,7 +717,7 @@ asr_sms_markread() {
 	_am_p=$(_hl_path "$2")
 	_am_a=$(_addr_for "$_am_p") || { echo '{"success":false}'; return 1; }
 	for _am_i in $(printf '%s' "$1" | tr -c '0-9' ' '); do
-		_am_r=$(_asr_sms_raw "$_am_a" "$_am_i")
+		_am_r=$(_asr_sms_raw "$_am_a" "$_am_i" "$_am_p")
 		[ -n "$_am_r" ] || continue
 		_asr_call "$_am_a" POST message "$(_asr_smsx "<flag><message_flag>SET_MSG_READ</message_flag><sms_cmd>7</sms_cmd></flag><get_message><tags>12</tags><mem_store>1</mem_store></get_message><set_message><read_message_id>$_am_r</read_message_id></set_message>")" "$_am_p" >/dev/null
 	done
@@ -738,7 +788,7 @@ asr_metrics_json() {
 			_r="" ;;
 	esac
 	if [ -z "$_r" ]; then
-		[ -f "$(_asr_ck "$_a").fail" ] || return 1
+		[ -f "$(_asr_ck "$_a" "$_HLP").fail" ] || return 1
 		printf '{"backend":"hilink","cport":"%s","protocol":"HiLink (web API)",' "$_a"
 		printf '"web_auth":"fail","registration":"","signal":"","conn_status":""}\n'
 		return 0
@@ -809,13 +859,14 @@ asr_metrics_json() {
 
 tenda_metrics_json() {
 	_HLP=$(_hl_path "$1")
-	_a=$(_addr_for "$_HLP") || return 2
-	_tenda_on "$_a"
+	_hl_ctx "$_HLP" || return 2
+	_a="$_HC_A"
+	_tenda_on "$_a" "$_HLP"
 	case $? in 1) return 1 ;; 2) return 2 ;; esac
 	_r=$(_tenda_get "$_a" "deviceInfo,connectStatus,batteryInfo,networkConfig" "$_HLP")
 	[ -n "$_r" ] || return 2
 	if _tenda_denied "$_r"; then
-		[ -f "$CACHE_DIR/tendaauth_$(_tk "$_a").fail" ] || return 2
+		[ -f "$CACHE_DIR/tendaauth_$(_sk "$_a" "$_HLP").fail" ] || return 2
 		printf '{"backend":"hilink","cport":"%s","protocol":"HiLink (web API)",' "$_a"
 		printf '"modem":"Tenda","web_auth":"fail","registration":"","signal":"","conn_status":""}\n'
 		return 0
@@ -863,7 +914,7 @@ tenda_metrics_json() {
 	printf '"cport":"%s",' "$_a"
 	printf '"protocol":"HiLink (web API)","vidpid":"%s",' "$(_vidpid_for "$_HLP")"
 	printf '"modem":"%s",' "$(jsafe "$_model")"
-	printf '"web_auth":"%s",' "$([ -s "$CACHE_DIR/tendaauth_$(_tk "$_a")" ] && echo ok || echo open)"
+	printf '"web_auth":"%s",' "$([ -s "$CACHE_DIR/tendaauth_$(_sk "$_a" "$_HLP")" ] && echo ok || echo open)"
 	printf '"imei":"%s","imsi":"%s","iccid":"%s",' "$(_tj IMEI)" "$(_tj IMSI)" "$(_tj ICCID)"
 	printf '"firmware":"%s","phone":"",' "$(jsafe "$(_tj softwareVersion)")"
 	printf '"operator_name":"%s",' "$(jsafe "$(_tj profileName)")"
@@ -886,22 +937,23 @@ tenda_metrics_json() {
 
 zte_metrics_json() {
 	_HLP=$(_hl_path "$1")
-	_a=$(_addr_for "$_HLP") || return 1
-	_zm_cmd="modem_main_state,ppp_status,network_type,network_provider,network_provider_fullname,signalbar,lte_rsrp,lte_rsrq,lte_rssi,lte_snr,rssi,rscp,ecio,cell_id,lac_code,rmcc,rmnc,hmcc,hmnc,wan_ipaddr,imei,msisdn,sim_imsi,iccid,wa_inner_version,lte_pci,lte_band,wan_active_band,hardware_version,battery_vol_percent,battery_charging,realtime_time,realtime_rx_bytes,realtime_tx_bytes,nv_rsrp,nv_rsrq,nv_sinr,nv_pci,nv_arfcn,mcc,mnc,tac_code"
-	_r=$(_zte_get "$_a" "$_zm_cmd")
+	_hl_ctx "$_HLP" || return 1
+	_a="$_HC_A"
+	_zm_cmd="modem_main_state,ppp_status,network_type,network_provider,network_provider_fullname,signalbar,lte_rsrp,lte_rsrq,lte_rssi,lte_snr,rssi,rscp,ecio,cell_id,lac_code,rmcc,rmnc,hmcc,hmnc,wan_ipaddr,imei,msisdn,sim_imsi,iccid,wa_inner_version,cr_version,wan_apn,lte_pci,lte_band,wan_active_band,hardware_version,battery_vol_percent,battery_charging,realtime_time,realtime_rx_bytes,realtime_tx_bytes,nv_rsrp,nv_rsrq,nv_sinr,nv_pci,nv_arfcn,mcc,mnc,tac_code"
+	_r=$(_zte_get "$_a" "$_zm_cmd" "$_HLP")
 	case "$_r" in
 		*'"modem_main_state"'*|*'"ppp_status"'*) ;;
 		*)
 		    _zm_m="/tmp/5gmodem/zteapi_$(echo "$_a" | tr -c 'A-Za-z0-9' '_')"
 		    if [ ! -f "$_zm_m" ]; then
 			: > "$_zm_m"
-			logger -t 5gmodem "hilink(zte): $_a did not answer $(_zte_getpath "$_a") (first 120 chars: $(printf '%s' "$_r" | tr '\n' ' ' | head -c 120))"
+			logger -t 5gmodem "hilink(zte): $_a did not answer $(_zte_getpath "$_a" "$_HLP") (first 120 chars: $(printf '%s' "$_r" | tr '\n' ' ' | head -c 120))"
 		    fi
 		    return 1 ;;
 	esac
 	case "$(_zj "$_r" lte_rsrp)$(_zj "$_r" rssi)" in
-		'') if _zte_login "$_a" >/dev/null 2>&1; then
-			_r2=$(_zte_get "$_a" "$_zm_cmd")
+		'') if _zte_login "$_a" "$_HLP" >/dev/null 2>&1; then
+			_r2=$(_zte_get "$_a" "$_zm_cmd" "$_HLP")
 			case "$_r2" in *'"modem_main_state"'*|*'"ppp_status"'*) _r="$_r2" ;; esac
 		   fi ;;
 	esac
@@ -953,12 +1005,19 @@ zte_metrics_json() {
 	_imsi=$(_zj "$_r" sim_imsi)
 	_iccid=$(_zj "$_r" iccid)
 	_fw=$(_zj "$_r" wa_inner_version)
+	[ -n "$_fw" ] || _fw=$(_zj "$_r" cr_version)
 	_phone=$(_zj "$_r" msisdn)
 	_mfm=$(printf '%s' "$_fw" | grep -oE 'MF[0-9]+[A-Za-z]*' | head -1 | sed 's/V$//')
 	[ -n "$_mfm" ] || _mfm=$(_zj "$_r" hardware_version | grep -oE 'MF[0-9]+[A-Za-z]*' | head -1 | sed 's/V$//')
 	case "$_fw" in
 		*_OLAX_*) _model="Olax"; [ -n "$_mfm" ] || _mfm=$(printf '%s' "$_fw" | grep -oE '^[A-Z]{1,4}[0-9]+' | head -1) ;;
 	esac
+	# OEM clones without "MF" in the strings: the model is the head of hardware_version
+	# (GW510U-MB_B -> GW510-U, the name AT+CGMM reports).
+	if [ -z "$_mfm" ]; then
+		_mfm=$( { _zj "$_r" hardware_version; printf '%s\n' "$_fw"; } | grep -oE '^[A-Z]{2,}[0-9]{2,}[A-Z]*' | head -1)
+		case "$_mfm" in GW510U) _mfm="GW510-U" ;; esac
+	fi
 	[ -n "$_mfm" ] && _model="${_model:+$_model }$_mfm"
 	_zbat=$(_zj "$_r" battery_vol_percent | tr -cd '0-9')
 	_zchg=$(_zj "$_r" battery_charging | tr -cd '0-9')
@@ -999,6 +1058,76 @@ ZC_EOF
 			fi ;;
 	esac
 	_pps=$(_zj "$_r" ppp_status)
+	# ZX297520 in debug mode (0581/0536): the web API of OEM clones (GW510-U) leaves the network
+	# type, operator, cell and RSRQ empty and reports ppp_disconnected on a working link.
+	# The AT port has them: +ZEMSCIQ: 1,<act>,<cellid>,<rac>,<tac>,"<plmn>",<pci>,<earfcn>,<band>,
+	# <rsrp+141>,<(rsrq+20)*2>,... (one command per request: the firmware runs only the first of a chain).
+	case "$(_vidpid_for "$_HLP")" in 19d2:0581|19d2:0536)
+		_zxp=$(uci -q get "$CFG.m_$(echo "$_HLP" | sed 's/[^A-Za-z0-9]/_/g').at_port")
+		_zxe=""; _zxc="$CACHE_DIR/zxat_$(_tk "$_HLP")"
+		[ -n "$_zxp" ] && [ -c "$_zxp" ] && _zxe=$(at_query "$_zxp" "AT+ZEMSCIQ=1" 4 3 2>/dev/null \
+			| tr -d '\r"' | sed -n 's/^+ZEMSCIQ: *1,//p' | head -1)
+		# The port is often busy (the alignment page polls every 2 s, SMS reads, other polls):
+		# then the last AT reading, up to 30 s old, stands in, instead of the card losing
+		# SINR, RSRQ and the cell for that round.
+		_zxold=""
+		if [ -z "$_zxe" ] && [ -s "$_zxc" ]; then
+			read -r _zxt _zxe _zxs _zxr _zxpp < "$_zxc"
+			case "$_zxt" in ''|*[!0-9]*) _zxe="" ;; *) [ $(( $(uptime_s) - _zxt )) -le 30 ] && _zxold=1 || _zxe="" ;; esac
+		fi
+		if [ -n "$_zxe" ]; then
+			IFS=, read -r _zx_act _zx_ci _zx_rac _zx_tac _zx_plmn _zx_pci _zx_arfcn _zx_band _zx_rsrp _zx_rsrq _zx_rest <<ZX_EOF
+$_zxe
+ZX_EOF
+			case "$_zx_band" in ''|*[!0-9]*|0) _zx_band="" ;; esac
+			if [ -n "$_zx_band" ]; then
+				case "$_ntype" in ''|*"No Service"*|*Limited*) _ntype="LTE" ;; esac
+				[ -n "$_zpband" ] || _zpband="B$_zx_band"
+				case "$_zx_ci" in ''|*[!0-9]*) ;; *)
+					[ "$_zx_ci" -gt 0 ] && { _cid="$_zx_ci"; _cid_hex=$(printf '%X' "$_zx_ci"); _zenb=$(( _zx_ci >> 8 )); } ;;
+				esac
+				case "$_zx_tac" in ''|*[!0-9]*) ;; *) [ "$_zx_tac" -gt 0 ] && _lac=$(printf '%X' "$_zx_tac") ;; esac
+				case "$_zx_pci" in ''|*[!0-9]*) ;; *) [ "$_zx_pci" -lt 504 ] && _zpci="$_zx_pci" ;; esac
+				case "$_zx_arfcn" in ''|*[!0-9]*) ;; *) _zearfcn="$_zx_arfcn" ;; esac
+				case "$_zx_rsrp" in ''|*[!0-9]*) ;; *) [ "$_zx_rsrp" -gt 0 ] && [ "$_zx_rsrp" -le 97 ] && _rsrp=$(( _zx_rsrp - 141 )) ;; esac
+				case "$_zx_rsrq" in ''|*[!0-9]*) ;; *) [ "$_zx_rsrq" -le 34 ] && _rsrq=$(awk -v v="$_zx_rsrq" 'BEGIN { printf "%.1f", v / 2 - 20 }') ;; esac
+				case "$_zx_plmn" in [0-9][0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9][0-9])
+					[ -n "$_mcc" ] || _mcc="${_zx_plmn%"${_zx_plmn#???}"}"
+					[ -n "$_mnc" ] || _mnc="${_zx_plmn#???}" ;;
+				esac
+				# network_provider may hold the bare PLMN ("25020"): resolve it to a name.
+				case "$_op" in *[!0-9]*) ;; *) _op="" ;; esac
+				if [ -z "$_op" ] && [ -n "$_mcc$_mnc" ]; then
+					_op=$(opname_pretty "$_mcc$_mnc" "")
+					_zob=$(opname_brand "$_imsi") && _op="$_zob"
+				fi
+				# +ZSINR / +ZRSSI print values as integer,tenth pairs: "+ZSINR: 28,5,27,7,..." = 28.5 dB first.
+				if [ -n "$_zxold" ]; then
+					[ -n "$_sinr" ] || { [ "$_zxs" = - ] || _sinr="$_zxs"; }
+					[ -n "$_rssi" ] || { [ "$_zxr" = - ] || _rssi="$_zxr"; }
+				fi
+				if [ -z "$_sinr" ] && [ -z "$_zxold" ]; then
+					_sinr=$(at_query "$_zxp" "AT+ZSINR" 4 3 2>/dev/null | tr -d '\r ' \
+						| sed -n 's/^+ZSINR:\(-\{0,1\}[0-9]\{1,2\}\),\([0-9]\),.*/\1.\2/p' | head -1)
+				fi
+				if [ -z "$_rssi" ] && [ -z "$_zxold" ]; then
+					_rssi=$(at_query "$_zxp" "AT+ZRSSI" 4 3 2>/dev/null | tr -d '\r ' \
+						| sed -n 's/^+ZRSSI:\(-[0-9]\{2,3\}\),[0-9],.*/\1/p' | head -1)
+				fi
+				_sp=$(sig_percent "$_ntype" "$_rsrp" "$_rsrq" "$_sinr" "" "" "$_rssi")
+				[ -n "$_sp" ] && _pct="$_sp"
+				if [ "$_pps" != ppp_connected ] && [ -z "$_zxold" ]; then
+					at_query "$_zxp" "AT+CGACT?" 4 3 2>/dev/null | tr -d '\r ' | grep -q '^+CGACT:[0-9]*,1' \
+						&& _pps=ppp_connected
+				fi
+				[ -n "$_zxold" ] && [ "$_zxpp" = ppp_connected ] && _pps=ppp_connected
+				[ -n "$_zxold" ] || printf '%s %s %s %s %s\n' "$(uptime_s)" "$_zxe" "${_sinr:--}" "${_rssi:--}" "$_pps" > "$_zxc"
+				case "$_wanip" in ''|0.0.0.0)
+					[ "$_pps" = ppp_connected ] && _wanip=$(zx_wanip "$_HLP") ;;
+				esac
+			fi
+		fi ;;
+	esac
 	_reg=0
 	if [ "$_pps" = "ppp_connected" ]; then
 		if [ -n "$_mcc" ] && [ "$_mcc" = "$(_zj "$_r" hmcc)" ]; then _reg=1; else _reg=5; fi
@@ -1036,6 +1165,9 @@ ZC_EOF
 	printf '"pci":"%s","pband":"%s","enbid":"%s",' "$_zpci" "$_zpband" "$_zenb"
 	[ -n "$_zearfcn" ] && printf '"earfcn":"%s",' "$_zearfcn"
 	printf '"ipaddr":"%s",' "$_wanip"
+	case "$_ntype:$_lac" in *LTE*:[0-9A-Fa-f]*) _ztd=$(printf '%d' "0x$_lac" 2>/dev/null) && [ "$_ztd" -gt 0 ] && printf '"tac_dec":"%s",' "$_ztd" ;; esac
+	_zapn=$(_zj "$_r" wan_apn)
+	[ -n "$_zapn" ] && printf '"iface_apn":"%s",' "$(jsafe "$_zapn")"
 	printf '"csq":"%s",' "$_csq"
 	printf '"battery":"%s","battery_charging":"%s","hl_modes":"1",' "$_zbat" "$_zchg"
 	case "$(_vidpid_for "$_HLP")" in
@@ -1056,8 +1188,9 @@ ZC_EOF
 	printf '}\n'
 }
 
+# $2: modem path, as in the ZTE helpers.
 _yota_get() {
-	_yg_src=$(_srcip_for "" "$1")
+	_yg_src=$(_hl_src "$1" "$2")
 	curl -s --max-time 6 ${_yg_src:+--interface "$_yg_src"} -A "$UA" "http://$1/status" 2>/dev/null | tr -d '\r'
 }
 
@@ -1065,8 +1198,9 @@ _yv() { printf '%s\n' "$1" | sed -n "s|^$2[[:space:]]*=[[:space:]]*||p" | head -
 
 yota_metrics_json() {
 	_HLP=$(_hl_path "$1")
-	_a=$(_addr_for "$_HLP") || return 1
-	_r=$(_yota_get "$_a")
+	_hl_ctx "$_HLP" || return 1
+	_a="$_HC_A"
+	_r=$(_yota_get "$_a" "$_HLP")
 	case "$_r" in *InterfaceType*=*) ;; *) return 1 ;; esac
 	_model=$(_yv "$_r" DeviceName)
 	_fw=$(_yv "$_r" FirmwareVersion)
@@ -1141,7 +1275,17 @@ yota_metrics_json() {
 
 _ng_at() {
 	command -v nc >/dev/null 2>&1 || return 1
-	{ printf 'ATE0\r\n%s\r\n' "$2"; sleep 2; } | timeout 6 nc "$1" 5510 2>/dev/null | tr -d '\r'
+	# no "timeout" applet in the stock busybox (and its nc has no -w): nc runs in the background
+	# and is killed after 6 s
+	mkdir -p /tmp/5gmodem 2>/dev/null
+	_na_o=$(mktemp /tmp/5gmodem/ng.XXXXXX 2>/dev/null) || return 1
+	{ printf 'ATE0\r\n%s\r\n' "$2"; sleep 2; } | nc "$1" 5510 > "$_na_o" 2>/dev/null &
+	_na_p=$!
+	_na_i=0
+	while kill -0 "$_na_p" 2>/dev/null && [ "$_na_i" -lt 6 ]; do sleep 1; _na_i=$((_na_i + 1)); done
+	kill "$_na_p" 2>/dev/null; wait "$_na_p" 2>/dev/null
+	tr -d '\r' < "$_na_o"
+	rm -f "$_na_o"
 }
 
 netgear_metrics_json() {
@@ -1240,6 +1384,7 @@ metrics_json() {
 		0846:68e1) netgear_metrics_json "$_HLP"; return $? ;;
 		1286:4e31) asr_metrics_json "$_HLP"; return $? ;;
 	esac
+	_hl_ctx "$_HLP" || return 1
 	_inf=$(api_get /api/device/information "$_HLP")
 	[ -n "$_inf" ] || return 1
 	_st=$(api_get /api/monitoring/status "$_HLP")
@@ -1492,7 +1637,7 @@ sms_delete() {
 }
 
 _zte_sms_fetch() {
-	_zte_get "$1" "sms_data_total&page=0&data_per_page=100&mem_store=$2&tags=10&order_by=order%20by%20id%20desc"
+	_zte_get "$1" "sms_data_total&page=0&data_per_page=100&mem_store=$2&tags=10&order_by=order%20by%20id%20desc" "$3"
 }
 
 _zte_sms_parse() {
@@ -1571,24 +1716,33 @@ _zte_sms_parse() {
 zte_sms_list() {
 	_zs_p=$(_hl_path "$2")
 	_zs_a=$(_addr_for "$_zs_p") || { echo '{"msg":[]}'; return 1; }
-	_zs_r=$(_zte_sms_fetch "$_zs_a" 1)
+	_zs_r=$(_zte_sms_fetch "$_zs_a" 1 "$_zs_p")
 	case "$_zs_r" in
 		*'"messages"'*) ;;
-		*) _zte_login "$_zs_a" >/dev/null 2>&1 && _zs_r=$(_zte_sms_fetch "$_zs_a" 1) ;;
+		*) _zte_login "$_zs_a" "$_zs_p" >/dev/null 2>&1 && _zs_r=$(_zte_sms_fetch "$_zs_a" 1 "$_zs_p") ;;
 	esac
 	case "$_zs_r" in
-		*'"messages":[]'*|*'"messages": []'*|'') _zs_r=$(_zte_sms_fetch "$_zs_a" 0) ;;
+		*'"messages":[]'*|*'"messages": []'*|'') _zs_r=$(_zte_sms_fetch "$_zs_a" 0 "$_zs_p") ;;
 	esac
 	printf '%s' "$_zs_r" | tr -d '\r\n' | _zte_sms_parse "${1:-in}"
 }
 
 zte_sms_count() {
-	_zc_a=$(_addr_for "$(_hl_path "$1")") || return 1
-	_zc_r=$(_zte_get "$_zc_a" "sms_capacity_info")
+	_zc_p=$(_hl_path "$1")
+	_zc_a=$(_addr_for "$_zc_p") || return 1
+	_zc_r=$(_zte_get "$_zc_a" "sms_capacity_info" "$_zc_p")
+	# Some ZX297520 firmwares (GW510-U) answer {"sms_capacity_info":""} with multi_data=1.
+	case "$_zc_r" in *'"sms_nv_total"'*) ;; *) _zc_r=$(_zte_get "$_zc_a" "sms_capacity_info&nomd" "$_zc_p") ;; esac
 	_zc_u=$(_zj "$_zc_r" sms_nv_rev_total)
 	_zc_m=$(_zj "$_zc_r" sms_nv_total)
-	printf '<LocalInbox>%s</LocalInbox><LocalMaxInbox>%s</LocalMaxInbox>\n' \
-		"${_zc_u:-0}" "${_zc_m:-100}"
+	_zc_s=ME
+	# zte_sms_list reads the SIM store when the modem store is empty: count what is shown
+	case "$_zc_u" in ''|0)
+		_zc_su=$(_zj "$_zc_r" sms_sim_rev_total)
+		case "$_zc_su" in ''|0) ;; *) _zc_u="$_zc_su"; _zc_m=$(_zj "$_zc_r" sms_sim_total); _zc_s=SM ;; esac ;;
+	esac
+	printf '<LocalInbox>%s</LocalInbox><LocalMaxInbox>%s</LocalMaxInbox><LocalStore>%s</LocalStore>\n' \
+		"${_zc_u:-0}" "${_zc_m:-100}" "$_zc_s"
 }
 
 _zte_ucs2hex() {
@@ -1638,12 +1792,13 @@ _zte_smstime() {
 
 zte_sms_send() {
 	[ -n "$1" ] && [ -n "$2" ] || { echo '{"error":"no number or text"}'; return 1; }
-	_zd_a=$(_addr_for "$(_hl_path "$3")") || { echo '{"success":false}'; return 1; }
-	_zte_login "$_zd_a" >/dev/null 2>&1
+	_zd_p=$(_hl_path "$3")
+	_zd_a=$(_addr_for "$_zd_p") || { echo '{"success":false}'; return 1; }
+	_zte_login "$_zd_a" "$_zd_p" >/dev/null 2>&1
 	_zd_n=$(printf '%s' "$1" | sed 's/+/%2B/g')
 	_zd_b=$(_zte_ucs2hex "$2")
 	_zd_r=$(_zte_set "$_zd_a" \
-		"goformId=SEND_SMS&notCallback=true&Number=$_zd_n&sms_time=$(_zte_smstime)&MessageBody=$_zd_b&ID=-1&encode_type=UNICODE")
+		"goformId=SEND_SMS&notCallback=true&Number=$_zd_n&sms_time=$(_zte_smstime)&MessageBody=$_zd_b&ID=-1&encode_type=UNICODE" "" "$_zd_p")
 	case "$_zd_r" in
 		*success*) echo '{"success":true}' ;;
 		*) printf '{"success":false,"code":"%s"}\n' "$(_zj "$_zd_r" result)" ;;
@@ -1651,14 +1806,83 @@ zte_sms_send() {
 }
 
 zte_sms_delete() {
-	_zx_a=$(_addr_for "$(_hl_path "$2")") || { echo '{"success":false}'; return 1; }
-	_zte_login "$_zx_a" >/dev/null 2>&1
-	_zx_r=$(_zte_set "$_zx_a" "goformId=DELETE_SMS&msg_id=$1;&notCallback=true")
+	_zx_p=$(_hl_path "$2")
+	_zx_a=$(_addr_for "$_zx_p") || { echo '{"success":false}'; return 1; }
+	_zte_login "$_zx_a" "$_zx_p" >/dev/null 2>&1
+	# $1: one id or a list "1;2;3", as the stick's own page sends it
+	_zx_r=$(_zte_set "$_zx_a" "goformId=DELETE_SMS&msg_id=$1;&notCallback=true" "" "$_zx_p")
 	case "$_zx_r" in
-		*success*) echo '{"success":true}' ;;
-		*) printf '{"success":false,"code":"%s"}\n' "$(_zj "$_zx_r" result)" ;;
+		*success*) ;;
+		*) printf '{"success":false,"code":"%s"}\n' "$(_zj "$_zx_r" result)"; return 1 ;;
 	esac
+	# The delete runs inside the stick after "success"; its page polls sms_cmd_status_info
+	# (answer sms_cmd_status_result: 3 done, 2 failed, 1 running) before the next command. Without the wait the next delete was
+	# refused while the previous one still ran.
+	_zx_n=0
+	while [ "$_zx_n" -lt 20 ]; do
+		case "$(_zj "$(_zte_get "$_zx_a" "sms_cmd_status_info&sms_cmd=6&nomd" "$_zx_p")" sms_cmd_status_result)" in
+			3) echo '{"success":true}'; return 0 ;;
+			2) echo '{"success":false,"code":"cmd"}'; return 1 ;;
+			'') break ;;	# firmware without the status field: nothing to wait for
+		esac
+		sleep 1; _zx_n=$((_zx_n + 1))
+	done
+	echo '{"success":true}'
 }
+# APN of a ZTE goform stick (APN_PROC_EX, as the stick's own page sends it). Profiles are
+# APN_configtmp0..19 "name($)apn($)user($)dial($)auth($)..($)..($)pdp($)..."; ours is named
+# "5gmodem" and reused, so repeated writes do not fill the stick's list.
+# $1: modem path. Prints {"mode","apn","profile","pdp","auto_apn"}.
+zte_apn_get() {
+	_za_p=$(_hl_path "$1")
+	_za_a=$(_addr_for "$_za_p") || { echo '{}'; return 1; }
+	_zte_login "$_za_a" "$_za_p" >/dev/null 2>&1
+	_za_r=$(_zte_get "$_za_a" "apn_mode,wan_apn,m_profile_name,pdp_type,ipv6_wan_apn,apn_auto_config" "$_za_p")
+	case "$_za_r" in *'"apn_mode"'*) ;; *) echo '{}'; return 1 ;; esac
+	_za_auto=$(_zj "$_za_r" apn_auto_config | awk -F'[(][$][)]' '{ print $2 }')
+	printf '{"mode":"%s","apn":"%s","profile":"%s","pdp":"%s","auto_apn":"%s"}\n' \
+		"$(jsafe "$(_zj "$_za_r" apn_mode)")" "$(jsafe "$(_zj "$_za_r" wan_apn)")" \
+		"$(jsafe "$(_zj "$_za_r" m_profile_name)")" "$(jsafe "$(_zj "$_za_r" pdp_type)")" "$(jsafe "$_za_auto")"
+}
+
+_zte_urlenc() { printf '%s' "$1" | sed 's/%/%25/g; s/&/%26/g; s/+/%2B/g; s/=/%3D/g; s/ /%20/g; s/;/%3B/g'; }
+
+# $1: APN ("" = the stick's own automatic choice), $2: IP|IPv4v6 (default IP), $3: modem path.
+zte_apn_set() {
+	_zs_apn="$1"; _zs_pdp="${2:-IP}"; _zs_p=$(_hl_path "$3")
+	case "$_zs_pdp" in IP|IPv4v6) ;; *) _zs_pdp=IP ;; esac
+	case "$_zs_apn" in *[!A-Za-z0-9._-]*) echo '{"success":false,"error":"bad apn"}'; return 1 ;; esac
+	_zs_a=$(_addr_for "$_zs_p") || { echo '{"success":false,"error":"no address"}'; return 1; }
+	_zte_login "$_zs_a" "$_zs_p" >/dev/null 2>&1
+	if [ -z "$_zs_apn" ]; then
+		_zs_r=$(_zte_post_auth "$_zs_a" "goformId=APN_PROC_EX&apn_mode=auto" "$_zs_p")
+	else
+		_zs_l=$(_zte_get "$_zs_a" "$(i=0; while [ $i -lt 20 ]; do printf 'APN_configtmp%d,' $i; i=$((i+1)); done)apn_num_preset" "$_zs_p")
+		# our profile if it is there, else the first empty slot after the preset ones
+		_zs_i=$(printf '%s' "$_zs_l" | awk -v RS=',' '
+			match($0, /"APN_configtmp[0-9]+":"[^"]*"/) {
+				n = $0; sub(/^.*APN_configtmp/, "", n); sub(/".*/, "", n); n += 0
+				v = $0; sub(/^[^:]*:"/, "", v); sub(/"$/, "", v)
+				if (v ~ /^5gmodem\(\$\)/ && mine == "") mine = n
+				if (v == "" && free == "") free = n
+			}
+			END { print (mine != "" ? mine : free) }')
+		[ -n "$_zs_i" ] || { echo '{"success":false,"error":"no free profile slot"}'; return 1; }
+		_zs_e=$(_zte_urlenc "$_zs_apn")
+		_zs_q="goformId=APN_PROC_EX&apn_action=save&apn_mode=manual&profile_name=5gmodem&wan_dial=*99%23&pdp_type=$_zs_pdp&pdp_select=auto&index=$_zs_i&wan_apn=$_zs_e&ppp_auth_mode=none&ppp_username=&ppp_passtmp="
+		[ "$_zs_pdp" = IPv4v6 ] && _zs_q="$_zs_q&dns_mode=auto&prefer_dns_manual=&standby_dns_manual=&ipv6_wan_apn=$_zs_e&ipv6_ppp_auth_mode=none&ipv6_ppp_username=&ipv6_ppp_passtmp="
+		_zs_r=$(_zte_post_auth "$_zs_a" "$_zs_q" "$_zs_p")
+		case "$_zs_r" in *success*) ;; *) printf '{"success":false,"error":"save refused"}\n'; return 1 ;; esac
+		_zs_r=$(_zte_post_auth "$_zs_a" "goformId=APN_PROC_EX&apn_mode=manual&apn_action=set_default&set_default_flag=1&pdp_type=$_zs_pdp&index=$_zs_i" "$_zs_p")
+	fi
+	case "$_zs_r" in *success*) ;; *) printf '{"success":false,"error":"refused"}\n'; return 1 ;; esac
+	# the new APN applies to the next data session: reconnect the stick's own dial-up
+	_zte_post_auth "$_zs_a" "goformId=DISCONNECT_NETWORK" "$_zs_p" >/dev/null 2>&1
+	sleep 3
+	_zte_post_auth "$_zs_a" "goformId=CONNECT_NETWORK" "$_zs_p" >/dev/null 2>&1
+	echo '{"success":true}'
+}
+
 _tenda_sms_conv() {
 	awk '
 		function fld(r, k,   v) {
@@ -1740,6 +1964,7 @@ hl_ussd() {
 	_code="$1"
 	[ -n "$_code" ] || { echo '{"error":"no code"}'; return 1; }
 
+	_hl_ctx "$2" >/dev/null 2>&1
 	api_post /api/ussd/release "" "$2" >/dev/null 2>&1
 
 	_r=$(api_post /api/ussd/send \
@@ -2047,19 +2272,19 @@ _zte_login_jar() {
 $_zlj_p"
 	fi
 	case "$(_zte_set "$1" "goformId=LOGIN&password=$(_zte_b64 "$_zlj_p" | sed 's/+/%2B/g; s/\//%2F/g; s/=/%3D/g')" \
-		"$CACHE_DIR/ztejar_$(_tk "$1")")" in
+		"$CACHE_DIR/ztejar_$(_sk "$1" "$2")" "$2")" in
 		*'"result":"0"'*|*'"result":"4"'*) return 0 ;;
 	esac
 	return 1
 }
 
 _zte_post_auth() {
-	_zpa_j="$CACHE_DIR/ztejar_$(_tk "$1")"
-	_zpa_r=$(_zte_set "$1" "$2" "$_zpa_j")
+	_zpa_j="$CACHE_DIR/ztejar_$(_sk "$1" "$3")"
+	_zpa_r=$(_zte_set "$1" "$2" "$_zpa_j" "$3")
 	case "$_zpa_r" in *'"success"'*) printf '%s' "$_zpa_r"; return 0 ;; esac
 	_zpa_jt=0; [ -z "$_zpa_r" ] && _zpa_jt=1
 	_zte_login_jar "$1" "$3" "$_zpa_jt" || return 1
-	_zpa_r=$(_zte_set "$1" "$2" "$_zpa_j")
+	_zpa_r=$(_zte_set "$1" "$2" "$_zpa_j" "$3")
 	printf '%s' "$_zpa_r"
 	case "$_zpa_r" in *'"success"'*) return 0 ;; esac
 	return 1
@@ -2069,7 +2294,7 @@ _adb_to() {
 	_at_t="$1"; shift
 	_5GM_ADB=1 adb "$@" 2>/dev/null 1000>&- 6>&- 7>&- 8>&- 9>&- &
 	_at_p=$!
-	( sleep "$_at_t"; kill "$_at_p" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+	( sleep "$_at_t" & _ws=$!; trap 'kill $_ws 2>/dev/null; exit' TERM; wait $_ws; kill "$_at_p" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
 	_at_w=$!
 	wait "$_at_p" 2>/dev/null
 	kill "$_at_w" 2>/dev/null
@@ -2105,8 +2330,8 @@ _mtk_adb_on() {
 	[ -f "$_ma_f" ] && [ -z "$(find "$_ma_f" -mmin +10 2>/dev/null)" ] && return 1
 	: > "$_ma_f"
 	_zte_login_jar "$1" "$2" 1 || return 1
-	_ma_j="$CACHE_DIR/ztejar_$(_tk "$1")"
-	_ma_src=$(_srcip_for "" "$1")
+	_ma_j="$CACHE_DIR/ztejar_$(_sk "$1" "$2")"
+	_ma_src=$(_hl_src "$1" "$2")
 	case "$(curl -s --max-time 8 ${_ma_src:+--interface "$_ma_src"} -A "$UA" -b "$_ma_j" -c "$_ma_j" \
 		-H "Referer: http://$1/index.html" "http://$1/adbWifiDebugForm.do?adb=1" 2>/dev/null)" in
 		*enabled*) logger -t 5gmodem "hilink(mtk): ADB over network enabled on $1 for temperatures" ;;
@@ -2334,6 +2559,27 @@ mtk_temps() {
 	printf '%s' "$_mt_o"
 }
 
+# WAN address of a ZX297520 stick over ADB: some firmwares (GW510-U) keep wan_ipaddr at 0.0.0.0
+# in the web API and in nv, while the address sits on the wan1 interface. Cached for a minute.
+zx_wanip() {
+	_zw_s=$(cat "/sys/bus/usb/devices/$1/serial" 2>/dev/null)
+	[ -n "$_zw_s" ] || return 1
+	_zw_f="$CACHE_DIR/zxwan_$(_tk "$1")"
+	if [ -f "$_zw_f" ] && [ -z "$(find "$_zw_f" -mmin +1 2>/dev/null)" ]; then
+		cat "$_zw_f"; return 0
+	fi
+	command -v adb >/dev/null 2>&1 || return 1
+	_adb_foreign "$_zw_s" && return 1
+	case "$(_adb_to 4 devices)" in *"$_zw_s	device"*) ;; *) return 1 ;; esac
+	_zw_n=$(_adb_to 6 -s "$_zw_s" shell 'nv get default_wan_name' | tr -d '\r' | head -1)
+	case "$_zw_n" in ''|*[!A-Za-z0-9_.-]*) _zw_n=wan1 ;; esac
+	_zw_o=$(_adb_to 6 -s "$_zw_s" shell "ip -4 addr show $_zw_n" | tr -d '\r' \
+		| sed -n 's/^ *inet \([0-9.]*\)\/.*/\1/p' | head -1)
+	case "$_zw_o" in ''|0.0.0.0|*[!0-9.]*) : > "$_zw_f"; return 1 ;; esac
+	printf '%s' "$_zw_o" > "$_zw_f"
+	printf '%s' "$_zw_o"
+}
+
 zx_battery() {
 	_zb_d="/sys/bus/usb/devices/$1"
 	_zb_s=$(cat "$_zb_d/serial" 2>/dev/null)
@@ -2367,7 +2613,7 @@ zx_battery() {
 
 zte_getmode() {
 	_a=$(_addr_for "$1") || return 1
-	case "$(_zj "$(_zte_get "$_a" net_select)" net_select)" in
+	case "$(_zj "$(_zte_get "$_a" net_select "$1")" net_select)" in
 		Only_LTE) echo 4 ;;
 		Only_WCDMA) echo 2 ;;
 		Only_GSM) echo 8 ;;
@@ -2384,7 +2630,7 @@ zte_setmode() {
 		*) echo '{"error":"bad mode"}'; return 1 ;;
 	esac
 	_a=$(_addr_for "$2") || { echo '{"error":"no address"}'; return 1; }
-	_zsp=$(_zj "$(_zte_get "$_a" net_priority)" net_priority)
+	_zsp=$(_zj "$(_zte_get "$_a" net_priority "$2")" net_priority)
 	if _zte_post_auth "$_a" "goformId=SET_BEARER_PREFERENCE&BearerPreference=$_zsm%0A${_zsp:-LTE_preferred}" "$2" >/dev/null; then
 		echo '{"success":true}'
 	else
@@ -2446,11 +2692,11 @@ case "$1" in
 			*'<classify>'*) printf '{"hilink":1,"addr":"%s","classify":"%s"}\n' \
 				"$_a" "$(printf '%s' "$_r" | xval classify)" ; exit 0 ;;
 		esac
-		_r=$(_zte_get "$_a" modem_main_state)
+		_r=$(_zte_get "$_a" modem_main_state "$2")
 		case "$_r" in
 			*'"modem_main_state"'*) printf '{"hilink":1,"addr":"%s","classify":"zte"}\n' "$_a"; exit 0 ;;
 		esac
-		case "$(_yota_get "$_a")" in
+		case "$(_yota_get "$_a" "$2")" in
 			*InterfaceType*=*) printf '{"hilink":1,"addr":"%s","classify":"yota"}\n' "$_a" ;;
 			*) printf '{"hilink":0,"addr":"%s"}\n' "$_a" ;;
 		esac
@@ -2479,7 +2725,7 @@ case "$1" in
 		case "$(_api_vid "$2")" in
 			19d2:*)
 				_a=$(_addr_for "$2") || exit 0
-				if _tenda_on "$_a"; then
+				if _tenda_on "$_a" "$2"; then
 					_tenda_set "$_a" deviceAction '{"deviceAction":{"action":"0"}}' "$2" >/dev/null
 				else
 					_zte_post_auth "$_a" "goformId=REBOOT_DEVICE" "$2" >/dev/null
@@ -2495,13 +2741,13 @@ case "$1" in
 		case "$(_api_vid "$3")" in
 			19d2:*)
 				_a=$(_addr_for "$(_hl_path "$3")") || { echo '{"success":false,"code":"noaddr"}'; exit 0; }
-				_r=$(_zte_set "$_a" "goformId=SET_DEVICE_MODE&debug_enable=$_m")
+				_r=$(_zte_set "$_a" "goformId=SET_DEVICE_MODE&debug_enable=$_m" "" "$3")
 				case "$_r" in
 					*successfully*)
-						if _tenda_on "$_a"; then
+						if _tenda_on "$_a" "$3"; then
 							_tenda_set "$_a" deviceAction '{"deviceAction":{"action":"0"}}' "$3" >/dev/null
 						else
-							_zte_set "$_a" "goformId=REBOOT_DEVICE" >/dev/null
+							_zte_set "$_a" "goformId=REBOOT_DEVICE" "" "$3" >/dev/null
 						fi
 						printf '{"success":true,"mode":"%s","reboot":1}\n' "$2" ;;
 					*) printf '{"success":false,"code":"%s"}\n' "$(_zj "$_r" result)" ;;
@@ -2550,6 +2796,12 @@ case "$1" in
 	setbands2g)  hl_setbands2g "$2" "$3" ;;
 	supbands2g)  hl_supbands2g "$2" ;;
 	getmode)     hl_getmode "$2" ;;
+	zteapn)
+		case "$2" in
+			get) zte_apn_get "$3" ;;
+			set) zte_apn_set "$3" "$4" "$5" ;;
+			*) echo '{"error":"usage: zteapn get [path] | set <apn> <IP|IPv4v6> [path]"}'; exit 1 ;;
+		esac ;;
 	zgetmode)    zte_getmode "$2" ;;
 	mtkbands)    mtk_bands_json "$2" ;;
 	mtksetbands) mtk_setbands "$2" "$3" ;;
