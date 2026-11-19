@@ -424,8 +424,7 @@ return view.extend({
 		var buttons = data.buttons || [];
 		var leds = (res && res[1]) || [];
 		var services = (res && res[2]) || [];
-		var body = E('div', {}, [
-			var head = E('div', { 'class': 'cbi-section tg-pg-head tg-btn-head' }, [
+		var head = E('div', { 'class': 'cbi-section tg-pg-head tg-btn-head' }, [
 			E('h3', { 'class': 'tg-pg-title tg-btn-title' }, E('span', {}, _('Buttons'))),
 			E('div', { 'class': 'tginfo-general' }, [
 				hd.ico,
@@ -438,6 +437,7 @@ return view.extend({
 				E('div', { 'class': 'tginfo-right' }, [ hd.add ])
 			])
 		]);
+//		var body = E('div', {}, [
 		var body = E('div', { 'class': 'tg-btn' }, [ head ]);
 		Promise.all([ L.resolveDefault(detect(), []), L.resolveDefault(detectLeds(), []), L.resolveDefault(detectServices(), []) ])
 			.then(function(res) { fill(res[0] || [], res[1] || [], res[2] || []); });
@@ -492,10 +492,11 @@ return view.extend({
 				});
 			}
 
-		assignable.forEach(function(b) { if (isConfigured(b)) { addCard(b); } });
-		refreshAdd();
-		ext.call('cards', data, API).forEach(function(c) { body.appendChild(c); });
-		return body;
+			assignable.forEach(function(b) { if (isConfigured(b)) { addCard(b); } });
+			refreshAdd();
+			ext.call('cards', data, API).forEach(function(c) { body.appendChild(c); });
+			return body;
+		}
 	},
 
 	handleSaveApply: null,
