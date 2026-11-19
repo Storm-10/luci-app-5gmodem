@@ -4,6 +4,7 @@
 'require fs';
 'require uci';
 'require ui';
+'require 5gmodem.ext as ext';
 
 /*
 	Copyright 2022-2026 Rafał Wabik - IceG - From eko.one.pl forum
@@ -297,7 +298,7 @@ function addNotifications(s) {
 							if (dsled == 'D') {
 								let led = uci.get('5gmodem', 'sms', 'smsled');
 								if (led)
-									return fs.write('/sys/class/leds/' + led + '/brightness', '0');
+									return L.resolveDefault(fs.write('/sys/class/leds/' + led + '/brightness', '0'));
 							}
 						});
 					}
@@ -345,7 +346,7 @@ function addNotifications(s) {
 		return L.resolveDefault(fs.list('/sys/class/leds'), []).then(L.bind(function(leds) {
 			if (leds.length > 0) {
 				leds.sort((a, b) => a.name < b.name ? -1 : (a.name > b.name ? 1 : 0));
-				leds.forEach(e => { if ((o.keylist || []).indexOf(e.name) < 0) { o.value(e.name); } });
+				leds.forEach(e => { if ((this.keylist || []).indexOf(e.name) < 0) { this.value(e.name); } });
 			}
 			return this.super('load', [section_id]);
 		}, this));
@@ -927,10 +928,12 @@ return baseclass.extend({
 
 		injectStyle();
 
+		return ext.load().then(function() {
 		var m = new form.Map('5gmodem');
 		var s = m.section(form.NamedSection, 'sms', 'sms', '', null);
 		s.addremove = false;
 		build(s);
+		ext.call('sms', group, s);
 
 		var storeKey = '5gmodem_settings_' + group;
 		var open = false;
@@ -947,6 +950,7 @@ return baseclass.extend({
 				try { localStorage.setItem(storeKey, det.open ? '1' : '0'); } catch (e) {}
 			});
 			return det;
+		});
 		});
 	}
 });
