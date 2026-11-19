@@ -87,9 +87,25 @@ proto_qmiraw_setup() {
 		return 1
 	}
 
+	if [ -x /usr/share/5gmodem/simwait.sh ] && ! /usr/share/5gmodem/simwait.sh check-interface "$interface"; then
+		proto_notify_error "$interface" SIM_MISSING
+		proto_block_restart "$interface"
+		return 1
+	fi
+
 	devname="$(basename "$device")"
 	devpath="$(readlink -f /sys/class/usbmisc/$devname/device/)"
 	ifname="$( ls "$devpath"/net )"
+	# PCIe on generic MHI: the QMI control port is a WWAN port and the data netdev (mhi_net,
+	# raw IP) sits under another channel of the same controller
+	local mhi_pci=""
+	if [ -z "$ifname" ] && [ -e "/sys/class/wwan/$devname/device" ]; then
+		. /usr/share/5gmodem/lib.sh 2>/dev/null
+		mhi_pci=$(tty_usbpath "$device" 2>/dev/null)
+		[ -n "$mhi_pci" ] && [ -e "/sys/bus/pci/devices/$mhi_pci" ] || mhi_pci=""
+		[ -n "$mhi_pci" ] && ifname=$(pci_data_netdev "$mhi_pci")
+		[ -n "$ifname" ] && echo "PCIe $mhi_pci: data interface $ifname (generic MHI, raw IP)"
+	fi
 	[ -n "$ifname" ] || {
 		echo "The interface could not be found."
 		proto_notify_error "$interface" NO_IFACE
@@ -115,6 +131,11 @@ proto_qmiraw_setup() {
 	uqmi -d "$device" -t 3000 --get-pin-status > /dev/null 2>&1
 	local sim_wait=0 pin_out uim_out
 	while [ "$sim_wait" -lt 30 ]; do
+		if [ -f "/tmp/5gmodem/simwait/$interface" ] && /usr/share/5gmodem/simwait.sh blocked "$interface"; then
+			proto_notify_error "$interface" SIM_MISSING
+			proto_block_restart "$interface"
+			return 1
+		fi
 		[ -e "$device" ] || return 1
 		pin_out=$(uqmi -s -d "$device" -t 1000 --get-pin-status 2>&1)
 		case "$pin_out" in
@@ -134,6 +155,11 @@ proto_qmiraw_setup() {
 	done
 	[ "$sim_wait" -gt 0 ] && echo "Waited ${sim_wait}s for the SIM"
 	while uqmi -s -d "$device" -t 1000 --get-pin-status | grep '"UIM uninitialized"' > /dev/null; do
+		if [ -f "/tmp/5gmodem/simwait/$interface" ] && /usr/share/5gmodem/simwait.sh blocked "$interface"; then
+			proto_notify_error "$interface" SIM_MISSING
+			proto_block_restart "$interface"
+			return 1
+		fi
 		[ -e "$device" ] || return 1
 		if [ "$uninitialized_timeout" -lt "$timeout" -o "$timeout" = "0" ]; then
 			let uninitialized_timeout++
@@ -149,6 +175,11 @@ proto_qmiraw_setup() {
 	local uim_state_timeout=0
 	local uim_unavail_timeout=0
 	while true; do
+		if [ -f "/tmp/5gmodem/simwait/$interface" ] && /usr/share/5gmodem/simwait.sh blocked "$interface"; then
+			proto_notify_error "$interface" SIM_MISSING
+			proto_block_restart "$interface"
+			return 1
+		fi
 		json_load "$(uqmi -s -d "$device" -t 2000 --uim-get-sim-state)"
 		json_get_var card_application_state card_application_state
 
@@ -290,8 +321,9 @@ proto_qmiraw_setup() {
 			echo "Device does not support 802.3 mode. Informing driver of raw-ip only for $ifname .."
 			echo "Y" > /sys/class/net/$ifname/qmi/raw_ip
 		else
-			case "$(basename "$(readlink -f "$devpath/driver")")" in
-				qmi_wwan_[qfs]) echo "Driver of $ifname is a vendor fork with fixed raw-ip, no raw_ip attribute needed" ;;
+			case "$(basename "$(readlink -f "$devpath/driver")"):$mhi_pci" in
+				qmi_wwan_[qfs]:*) echo "Driver of $ifname is a vendor fork with fixed raw-ip, no raw_ip attribute needed" ;;
+				*:?*) echo "$ifname is an MHI raw-ip interface, no raw_ip attribute needed" ;;
 				*)
 					echo "Device only supports raw-ip mode but is missing this required driver attribute: /sys/class/net/$ifname/qmi/raw_ip"
 					return 1 ;;

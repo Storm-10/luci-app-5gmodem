@@ -16,6 +16,11 @@ ifup интерфейса активного модема (хук `/etc/hotplug.
 ни одного лишнего запроса к модему), а каждый внешний вызов `5gmodem.sh` — это
 полный форк опроса и очередь к AT-порту.
 
+Снимок метрик (`/tmp/5gmodem/metrics_<модем>.json` и `.stamp`) пишет и опрос
+стиков с веб-API (HiLink, ZTE, Tenda, ASR): до 3.9.47 он туда не попадал, и у
+таких стиков в `tele.json` были только пинг и трафик, а у внешних экранов не было
+ни бенда, ни уровней, ни IP, ни APN.
+
 Формат канонический: короткие имена полей, единица зашита в поле, числа числами — одинаково для всех потребителей.
 
 ## Поля
@@ -25,14 +30,18 @@ ifup интерфейса активного модема (хук `/etc/hotplug.
 | `sig` | 0..100 | % | Качество сигнала, сведённое к процентам |
 | `oper` | строка | — | Имя оператора |
 | `model` | строка | — | Модель модема |
+| `sim_state` | string | — | Active modem SIM state: `absent`, `locked`, `ready`, `unknown` |
+| `waiting_sim` | boolean | — | Automatic connection is paused while waiting for a SIM |
 | `rsrp` | int | dBm | Мощность опорного сигнала (дробное от модема округляется к ближайшему) |
 | `rsrq` | int | dB | Качество опорного сигнала |
 | `sinr` | int | dB | Сигнал/шум |
 | `band` | строка | — | Первичная несущая одним токеном: `B3`, `n78` |
 | `ca` | строка | — | Активная агрегация: `B3+B7+n78` (PCC первым; поля нет, если несущая одна) |
+| `ul_ca` | строка | — | Несущие, по которым идёт и отдача: `B3+B1` (PCC первым). Есть, только когда модем сообщает вторую такую несущую (FM350: `ul_configured` в `AT+GTCAINFO?`); нет ключа — либо одна несущая на отдачу, либо модем этого не сообщает |
 | `mode` | строка | — | `2G` / `3G` / `4G` / `4G+` / `5G NSA` / `5G SA` |
 | `temp` | int | °C | Температура модема |
 | `therm` | int | 0–3 | Уровень теплового троттлинга модема: 0 — норма, 1 — тёплый, 2 — горячий, 3 — критический. Есть только у модемов, которые его отдают (Compal, Foxconn, Telit) |
+| `temps` | строка | °C | Датчики по отдельности, пары `имя=значение` через пробел: `cpu=48.2 pa=41.0 pmic=39.5`. Есть только у устройств, где приложение читает несколько датчиков (стики MSM8916). Хост, который берёт телеметрию такого устройства по сети, показывает этот список у себя
 | `bat` | int | % | Заряд батареи (только у устройств с батареей) |
 | `chg` | int | 0/1 | Идёт зарядка |
 | `dist` | int | м | Расстояние до базовой станции по timing advance (последнее значение на текущей соте) |
@@ -43,6 +52,8 @@ ifup интерфейса активного модема (хук `/etc/hotplug.
 | `cc` | строка | — | Код страны внешнего адреса (`RU`, `NL`) — появляется, когда включён «Внешний IP» |
 | `wan_ip`, `ext_ip`, `ext_ip6` | строка | — | Адреса — только при `tele.publish_ip=1` (по умолчанию их здесь нет, см. ниже) |
 | `phone` | строка | — | Номер SIM — только при `tele.publish_phone=1` (по умолчанию его здесь нет) |
+| `gps_fix` | int | — | GNSS: 0 — нет позиции, 2 — 2D, 3 — 3D. Только при `tele.publish_gps=1` |
+| `gps_lat`, `gps_lon`, `gps_alt`, `gps_speed`, `gps_course`, `gps_sats`, `gps_hdop` | число | °, °, м, км/ч, °, шт, — | Позиция приёмника модема — только при `tele.publish_gps=1` и `gps_fix` > 0, см. [gps.md](subsystems/gps.md) |
 
 Правила (из схемы, здесь они соблюдаются строго):
 
@@ -114,8 +125,11 @@ ifup интерфейса активного модема (хук `/etc/hotplug.
 | `lac` | int | Location Area Code |
 | `cid_hex` | строка | Идентификатор соты в hex |
 | `bandwidth`, `txpower`, `uecat`, `volte`, `mimo`, `rxdiv`, `antports`, `therm`, `fw` | строка | Витринные значения как в снимке метрик |
-| `pathloss`, `cqi`, `csq`, `rssi`, `conn_time`, `simslot`, `roaming`, `nca` | int | Числовые детали (conn_time — секунды, nca — активных вторичных несущих) |
-| `s1band`..`s4state` | — | Несущие агрегации: band/pci/earfcn/rsrp/rsrq/sinr/state на слот |
+| `pathloss`, `cqi`, `csq`, `rssi`, `conn_time`, `simslot`, `roaming`, `nca` | int | Числовые детали (conn_time — секунды, nca — активных вторичных несущих; несущая без сообщённого состояния считается активной, как и в поле `ca` основного файла) |
+| `pband` | строка | Основная несущая как на карточке: `B7 (2600 MHz) @20.0 MHz` |
+| `bw` | число | Ширина основной несущей (PCC), МГц: `20.0`. Из `pband`, иначе из `bandwidth` |
+| `s1band`..`s4state` | — | Несущие агрегации: band/pci/earfcn/rsrp/rsrq/sinr/state на слот. `state` нет, если модем его не сообщает (DW5821e через MBIM) |
+| `s1bw`..`s4bw` | число | Ширина вторичной несущей, МГц |
 | `phone` | строка | Номер SIM. В публикуемый файл попадает только при `tele.publish_phone=1` |
 
 Он подчиняется тем же правилам (атомарность, свежесть, «нет данных — нет
@@ -244,7 +258,7 @@ uci commit 5gmodem
 
 | Кто | Пишет | Куда |
 |---|---|---|
-| 5gmodem | `sig oper model rsrp rsrq sinr band ca mode temp therm bat chg dist tz ping rx tx sms cc` (+ адреса при `publish_ip=1`, `phone` при `publish_phone=1`) | `/tmp/5gmodem/tele.json` |
+| 5gmodem | `sig oper model rsrp rsrq sinr band ca mode temp therm temps bat chg dist tz ping rx tx sms cc` (+ адреса при `publish_ip=1`, `phone` при `publish_phone=1`, `gps_*` при `publish_gps=1`) | `/tmp/5gmodem/tele.json` |
 | Ваш агрегатор | всё остальное | свой файл |
 
 ## Чего читать не надо
@@ -351,3 +365,10 @@ logread | grep 5gmodem                  # если что-то не так
 Пустые модемные поля при работающем модеме — обычно значит, что страница
 «Сеть» давно не открывалась и снимок метрик не обновлялся: сторож обновляет
 его сам в фоне, подождите один круг (до минуты) или откройте страницу.
+
+SIM wait state is read from its own cache without querying the modem and is
+updated even when the radio snapshot is stale. Both fields are included in
+`tele.json`, the `/cgi-bin/5gmodem-tele` HTTP response, MQTT state JSON and
+`tele_cell.json`. `waiting_sim` is a JSON boolean (`true`/`false`). `unknown` means
+there is no fresh confirmed SIM state. The normal telemetry freshness rules apply
+when the entire modem is removed.

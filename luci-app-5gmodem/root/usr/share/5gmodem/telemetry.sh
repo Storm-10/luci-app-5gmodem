@@ -35,6 +35,10 @@ _int() {
 
 _J=""
 _num() { [ -n "$2" ] && _J="$_J${_J:+,}\"$1\":$2"; }
+# carrier width in MHz from "B7 (2600 MHz) @20.0 MHz" or "20 MHz"; a number for exporters
+_bw() { printf '%s' "$1" | sed -nE 's/^(.*@)? *([0-9]{1,3}(\.[0-9])?)[0-9]* *MHz.*$/\2/p' | head -1; }
+# a secondary carrier counts unless the modem says it is not active: MBIM/QMI (DW5821e) give no state
+_sc_on() { case "$1" in activated|''|-) return 0 ;; *) return 1 ;; esac; }
 _str() {
 	[ -n "$2" ] || return 0
 	_s="$2"
@@ -42,6 +46,11 @@ _str() {
 		*\\*|*\"*|*[[:cntrl:]]*) _s=$(printf '%s' "$_s" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g') ;;
 	esac
 	_J="$_J${_J:+,}\"$1\":\"$_s\""
+}
+
+_tele_sim_fields() {
+	case "$_tele_sim_state" in absent|locked|ready|unknown) _str sim_state "$_tele_sim_state" ;; esac
+	case "$_tele_sim_waiting" in true|false) _J="$_J${_J:+,}\"waiting_sim\":$_tele_sim_waiting" ;; esac
 }
 
 tele_write() {
@@ -70,6 +79,8 @@ tele_write() {
 	_num sinr "$(_int "$(_jf sinr)")"
 	_num temp "$(_int "$(_jf mtemp | sed 's/ *&deg;C//')")"
 	_num therm "$(_int "$(_jf mtherm)")"
+	# per-sensor readings ("cpu=48.2 pa=41.0"), so a host that reads this device over the network can list them too
+	_str temps "$(_jf temps | sed 's/^-$//')"
 	_num bat  "$(_int "$(_jf battery)")"
 	_num chg  "$(_int "$(_jf battery_charging)")"
 	_num dist "$(_int "$(_jf bs_distance)")"
@@ -79,11 +90,14 @@ tele_write() {
 	_str band "$_pb"
 	_ca="$_pb"
 	for _i in 1 2 3 4; do
-		[ "$(_jf "s${_i}state")" = "activated" ] || continue
+		_sc_on "$(_jf "s${_i}state")" || continue
 		_sb=$(_jf "s${_i}band" | grep -oE '^[Bn][0-9]+' | head -1)
 		[ -n "$_sb" ] && _ca="$_ca+$_sb"
 	done
 	case "$_ca" in *+*) _str ca "$_ca" ;; esac
+	# carriers the upload goes over too, "B3+B1"; only when the modem reports a second one
+	_ul=$(_jf ulcc | grep -E '^[Bn][0-9]+(\+[Bn][0-9]+)+$')
+	_str ul_ca "$_ul"
 
 	_md=$(_jf mode | sed 's/ *|.*//; s/ B[0-9].*//')
 	case "$_md" in
@@ -103,6 +117,12 @@ tele_write() {
 	_net=""
 	[ -n "$_fresh" ] && _net=$(_jf iface)
 	[ -n "$_net" ] || _net=$(uci -q get "$CFG.@5gmodem[0].network")
+	_tele_sim_state=""; _tele_sim_waiting=""
+	if [ -n "$_net" ] && [ -x /usr/share/5gmodem/simwait.sh ]; then
+		_tele_sim_json=$(/usr/share/5gmodem/simwait.sh status "$_net" 2>/dev/null)
+		_tele_sim_state=$(jsonfilter -s "$_tele_sim_json" -e '@.sim_state' 2>/dev/null)
+		_tele_sim_waiting=$(jsonfilter -s "$_tele_sim_json" -e '@.waiting_sim' 2>/dev/null)
+	fi
 	if [ -n "$_net" ] && [ -f "/tmp/5gmodem/health/$_net" ]; then
 		read -r _hs _hf _ho _hms _hsince < "/tmp/5gmodem/health/$_net"
 		[ "$_hs" = "up" ] && _num ping "$(_int "$_hms")"
@@ -146,6 +166,20 @@ tele_write() {
 		_str ext_ip6 "$_te_xip6"
 	fi
 	[ -n "$_fresh" ] && [ "$(_g publish_phone)" = "1" ] && _str phone "$(_jf phone | tr -cd '+0-9')"
+	# the position costs one AT query or a 2 s NMEA read per tick, so it is opt-in (docs/subsystems/gps.md)
+	if [ "$(_g publish_gps)" = "1" ] && [ -x /usr/share/5gmodem/gps.sh ]; then
+		_tg=$(/usr/share/5gmodem/gps.sh status 2>/dev/null)
+		_tg_f=$(jsonfilter -s "$_tg" -e '@.fix' 2>/dev/null)
+		case "$_tg_f" in [0-9]) _num gps_fix "$_tg_f" ;; esac
+		if [ -n "$_tg_f" ] && [ "$_tg_f" != 0 ]; then
+			for _tg_k in lat lon alt speed course sats hdop; do
+				_tg_v=$(jsonfilter -s "$_tg" -e "@.$_tg_k" 2>/dev/null)
+				case "$_tg_v" in
+					-[0-9]*|[0-9]*) case "${_tg_v#-}" in *[!0-9.]*) ;; *) _num "gps_$_tg_k" "$_tg_v" ;; esac ;;
+				esac
+			done
+		fi
+	fi
 
 	if [ -n "$_fresh" ]; then
 		case "$_J" in
@@ -154,12 +188,15 @@ tele_write() {
 				_tw_age=$(( $(date +%s) - $(date -r "$TELE" +%s 2>/dev/null || echo 0) ))
 				if [ "$_tw_age" -lt 120 ]; then
 					case "$(cat "$TELE" 2>/dev/null)" in
-						*'"sig"'*|*'"rsrp"'*|*'"oper"'*) return 0 ;;
+						*'"sig"'*|*'"rsrp"'*|*'"oper"'*)
+						if [ "$(jsonfilter -i "$TELE" -e '@.sim_state' 2>/dev/null)" = "$_tele_sim_state" ] \
+							&& [ "$(jsonfilter -i "$TELE" -e '@.waiting_sim' 2>/dev/null)" = "$_tele_sim_waiting" ]; then return 0; fi ;;
 					esac
 				fi ;;
 		esac
 	fi
 
+	_tele_sim_fields
 	printf '{%s}\n' "$_J" > "$TELE.tmp" && mv "$TELE.tmp" "$TELE"
 
 	_J=""
@@ -179,6 +216,10 @@ tele_write() {
 		_num lac      "$(_int "$(_jf lac_dec)")"
 		_str cid_hex  "$(_jf cid_hex | sed 's/^-$//')"
 		_str bandwidth "$(_jf bandwidth | sed 's/^-$//')"
+		_pbs=$(_jf pband | sed 's/^-$//')
+		_str pband "$_pbs"
+		_pbw=$(_bw "$_pbs"); [ -n "$_pbw" ] || _pbw=$(_bw "$(_jf bandwidth)")
+		_num bw "$_pbw"
 		_num pathloss "$(_int "$(_jf pathloss)")"
 		_str txpower  "$(_jf txpower | sed 's/^-$//')"
 		_num cqi      "$(_int "$(_jf cqi)")"
@@ -200,14 +241,15 @@ tele_write() {
 			_sb=$(_jf "s${_i}band" | sed 's/^-$//')
 			[ -n "$_sb" ] || continue
 			_str "s${_i}band"   "$_sb"
+			_num "s${_i}bw"     "$(_bw "$_sb")"
 			_num "s${_i}pci"    "$(_int "$(_jf "s${_i}pci")")"
 			_num "s${_i}earfcn" "$(_int "$(_jf "s${_i}earfcn")")"
 			_num "s${_i}rsrp"   "$(_int "$(_jf "s${_i}rsrp")")"
 			_num "s${_i}rsrq"   "$(_int "$(_jf "s${_i}rsrq")")"
 			_num "s${_i}sinr"   "$(_int "$(_jf "s${_i}sinr")")"
 			_ss=$(_jf "s${_i}state")
-			_str "s${_i}state" "$_ss"
-			[ "$_ss" = "activated" ] && _nca=$((_nca + 1))
+			_str "s${_i}state" "$(printf '%s' "$_ss" | sed 's/^-$//')"
+			_sc_on "$_ss" && _nca=$((_nca + 1))
 		done
 		_num nca "$_nca"
 		_nb=$(grep -o '"neighbors":\[[^]]*\]' "$_SNAP" 2>/dev/null | head -1)
@@ -219,6 +261,7 @@ tele_write() {
 		_str ext_ip  "$_te_xip"
 		_str ext_ip6 "$_te_xip6"
 	fi
+	_tele_sim_fields
 	printf '{%s}\n' "$_J" > "$TELE_CELL.tmp" && mv "$TELE_CELL.tmp" "$TELE_CELL"
 }
 
@@ -272,6 +315,7 @@ tele_discovery() {
 	_disc mode "Network mode"  ""     ""
 	_disc band "Band"          ""     ""
 	_disc ca   "Carrier aggregation" "" ""
+	_disc ul_ca "Uplink carrier aggregation" "" ""
 	_disc ping "Ping"          "ms"   duration
 	_disc rx   "Download rate" "B/s"  data_rate
 	_disc tx   "Upload rate"   "B/s"  data_rate
@@ -283,6 +327,16 @@ tele_discovery() {
 		_disc ext_ip6 "External IPv6"    "" ""
 	fi
 	[ "$(_g publish_phone)" = "1" ] && _disc phone "Phone number" "" ""
+	if [ "$(_g publish_gps)" = "1" ]; then
+		_disc gps_fix    "GNSS fix"   ""     ""
+		_disc gps_lat    "Latitude"   "°"    ""
+		_disc gps_lon    "Longitude"  "°"    ""
+		_disc gps_alt    "Altitude"   "m"    distance
+		_disc gps_speed  "Speed"      "km/h" speed
+		_disc gps_course "Course"     "°"    ""
+		_disc gps_sats   "Satellites" ""     ""
+		_disc gps_hdop   "HDOP"       ""     ""
+	fi
 	if [ -n "$_disc_fail" ]; then
 		echo '{"error":"broker rejected the publish"}'
 		return 1

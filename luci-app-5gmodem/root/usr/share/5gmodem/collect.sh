@@ -386,6 +386,20 @@ dns_verdict() {
 		echo "  A query to a foreign one leaves via another uplink's default route, and that"
 		echo "  uplink drops it: to clients it looks like 'sites load every other time'."
 	}
+	for _dv_i in $(uci -q show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)\.proto='\?mbim'\?\$/\1/p"); do
+		_dv_lost=$(mbim_lost_dns "$_dv_i") || continue
+		if grep -qE "^# Interface ${_dv_i}_4\$" "$_dv_auto" 2>/dev/null; then
+			echo "  $_dv_i (mbim): the firmware's mbim.sh dropped the carrier's DNS ($_dv_lost);"
+			echo "  the app put them back into resolv.conf.auto (watchdog round / ifup hotplug)."
+		else
+			echo "  PROBLEM: $_dv_i (mbim) is up, but neither it nor ${_dv_i}_4 has DNS servers,"
+			echo "  although the modem reported $_dv_lost. This is a bug of mbim.sh in OpenWrt"
+			echo "  25.12.6 (umbim commit 152b86e6ab: DNS is passed on only with dhcp=1; fixed"
+			echo "  on main by b556a45351). The app puts these servers back by itself; if this"
+			echo "  line shows up, that did not happen (watchdog busy, no answer over AT)."
+			echo "  By hand: uci add_list network.$_dv_i.dns='77.88.8.8'; uci commit network; ifup $_dv_i"
+		fi
+	done
 	if [ -n "$_dv_dead" ]; then
 		echo "  PROBLEM: DNS servers set by hand do not answer:$_dv_dead"
 		echo "  They come from the 'dns' option of the interface - the app writes it with"
@@ -396,7 +410,8 @@ dns_verdict() {
 		echo "  77.88.8.8 77.88.8.1 there."
 	fi
 	echo "--- DNS rebind protection ---"
-	_dv_rb=$(logread 2>/dev/null | grep -i "rebind" | tail -20)
+	# dnsmasq announces "DNS rebinding protection is active" at every start: that is not a block
+	_dv_rb=$(logread 2>/dev/null | grep -i "rebind" | grep -v "protection is active" | tail -20)
 	if [ -n "$_dv_rb" ]; then
 		_dv_names=$(printf '%s\n' "$_dv_rb" | sed -n 's/.*[Dd]etected[:,]* *//p' | sort | uniq -c)
 		if [ -n "$_dv_names" ]; then
@@ -1668,6 +1683,10 @@ _sum_verdict() {
 				*)
 					echo "The modem is online (address $_sv_ip, probes by IP go through),"
 					echo "but the router's DNS DOES NOT ANSWER - sites will not open."
+					if _sv_lost=$(mbim_lost_dns "$_sv_if"); then
+						echo "Cause: mbim.sh of this firmware (OpenWrt 25.12.6) did not pass on the"
+						echo "carrier's DNS ($_sv_lost) - the link has no resolver at all."
+					fi
 					_sv_dns=$(uci -q get "network.$_sv_if.dns" 2>/dev/null)
 					if [ -n "$_sv_dns" ]; then
 						echo "DNS servers set by hand on $_sv_if: $_sv_dns ('Fallback DNS')."
@@ -1685,9 +1704,16 @@ report() {
 	echo "===== luci-app-5gmodem: diagnostic report ====="
 	echo "Collected: $(date)"
 	echo ""
-	echo "WARNING: this report contains modem and SIM identifiers (IMEI, IMSI,"
-	echo "ICCID, EID) and the carrier name. Passwords and Wi-Fi keys are NOT included."
-	echo "If you would rather not publish the identifiers, send the file privately."
+	if [ -n "$ANON" ]; then
+		echo "ANONYMOUS REPORT: IMEI, IMSI, ICCID, EID, serial and phone numbers, the router's"
+		echo "public IP and MAC addresses and coordinates are masked (the first digits are kept:"
+		echo "they name the modem model and the operator). The carrier name is included."
+		echo "Passwords and Wi-Fi keys are NOT included."
+	else
+		echo "WARNING: this report contains modem and SIM identifiers (IMEI, IMSI,"
+		echo "ICCID, EID) and the carrier name. Passwords and Wi-Fi keys are NOT included."
+		echo "If you would rather not publish the identifiers, send the file privately."
+	fi
 	echo ""
 	echo "----- THE SHORT STORY -----"
 	echo "Router:    $(cat /tmp/sysinfo/model 2>/dev/null | head -1)"
@@ -2099,13 +2125,62 @@ _proto_names() {
 	sed -E '/^[A-Za-z0-9_@]+[.][^= ]*=/!{s/(^|[^A-Za-z0-9_])mbimp([^.A-Za-z0-9_-]|$)/\1MBIM+MM\2/g}'
 }
 
+# "Anonymous" report: a sed filter over the finished text. Values known to the router (phone
+# numbers, serials, its public addresses) are replaced by name; everything else by shape:
+# digit runs of 15+ (IMEI, IMSI, ICCID, EID) keep 6 digits, MAC addresses keep the vendor half,
+# global IPv6 addresses keep the first two groups, coordinates are dropped.
+_anon_rules() {
+	# phone numbers: uci options and the metrics snapshots
+	{ uci -q show 5gmodem 2>/dev/null | sed -n "s/^[^=]*\(phone\|msisdn\)[^=]*='\(.*\)'\$/\2/p"
+	  cat /tmp/5gmodem/metrics_*.json 2>/dev/null | sed -n 's/.*"phone" *: *"\([^"]*\)".*/\1/p'
+	} | tr -cd '0-9\n' | sort -u | while read -r _an_v; do
+		[ "${#_an_v}" -ge 7 ] || continue
+		printf 's/\\+?%s/<phone>/g\n' "$_an_v"
+		# the national form without the country code (last 10 digits)
+		[ "${#_an_v}" -ge 11 ] && printf 's/%s/<phone>/g\n' "$(printf '%s' "$_an_v" | sed 's/^.*\(..........\)$/\1/')"
+	done
+	# serial numbers stored for the modems
+	{ uci -q show 5gmodem 2>/dev/null; uci -q show network 2>/dev/null; } \
+		| sed -n "s/^[^=]*serial[^=]*='\([A-Za-z0-9]*\)'\$/\1/p" | sort -u | while read -r _an_v; do
+		[ "${#_an_v}" -ge 6 ] && printf 's/%s/<serial>/g\n' "$_an_v"
+	done
+	# the router's own public IPv4 addresses and the external one
+	{ ip -4 -o addr show scope global 2>/dev/null | sed -n 's/.* inet \([0-9.]*\).*/\1/p'
+	  "$RES/extip.sh" get 2>/dev/null | sed -n 's/.*"ip" *: *"\([0-9.]*\)".*/\1/p'
+	  "$RES/extip.sh" get modem 2>/dev/null | sed -n 's/.*"ip" *: *"\([0-9.]*\)".*/\1/p'
+	} | sort -u | while read -r _an_v; do
+		case "$_an_v" in ''|10.*|192.168.*|127.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) continue ;; esac
+		case "$_an_v" in 100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) continue ;; esac
+		printf 's/(^|[^0-9.])%s([^0-9.]|$)/\\1<public-ip>\\2/g\n' "$(printf '%s' "$_an_v" | sed 's/\./\\./g')"
+	done
+	cat <<'ANON_EOF'
+s/(^|[^0-9])([0-9]{6})[0-9]{9,}/\1\2xxxxxxxxx/g
+s/\+[0-9]{10,14}/<phone>/g
+s/([0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){2})(:[0-9A-Fa-f]{2}){3}/\1:xx:xx:xx/g
+s/(^|[^0-9A-Fa-f:])([23][0-9A-Fa-f]{3}:[0-9A-Fa-f]{1,4}):[0-9A-Fa-f:]{6,}/\1\2:x:x:x:x/g
+s/("(lat|lon|latitude|longitude)" *: *)-?[0-9]+(\.[0-9]+)?/\1"<hidden>"/g
+s/((lat|lon|latitude|longitude)=)-?[0-9]+\.[0-9]+/\1<hidden>/g
+s/[0-9]{4,5}\.[0-9]{3,},([NSEW])/<hidden>,\1/g
+ANON_EOF
+}
+_anon() {
+	_an_f="/tmp/5gmodem/.diag-anon.$$"
+	_anon_rules > "$_an_f" 2>/dev/null
+	sed -E -f "$_an_f"
+	rm -f "$_an_f"
+}
+_filter() { if [ -n "$ANON" ]; then _proto_names | _anon; else _proto_names; fi; }
+
+ANON=""; [ "$2" = anon ] && ANON=1
+export ANON
+
 case "$1" in
 start)
 	if [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
 		echo '{"state":"running"}'; exit 0
 	fi
 	rm -f "$OUT"; echo "0/9 start" > "$STEP"
-	( report 2>&1 | tr -d '\000' | _proto_names > "$OUT"; rm -f "$LOCK" ) >/dev/null 2>&1 </dev/null &
+	( report 2>&1 | tr -d '\000' | _filter > "$OUT"; rm -f "$LOCK" ) >/dev/null 2>&1 </dev/null &
 	echo $! > "$LOCK"
 	echo '{"state":"running"}'
 	# see docs/subsystems/diagnostics.md#background-collection
@@ -2121,10 +2196,10 @@ status)
 	fi
 	;;
 run)
-	report | _proto_names
+	report | _filter
 	;;
 *)
-	echo "usage: collect.sh start|status|run"
+	echo "usage: collect.sh start [anon]|status|run [anon]"
 	;;
 esac
 exit 0

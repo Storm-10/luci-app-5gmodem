@@ -84,6 +84,12 @@ Rules:
 - dnsmasq re-reads the file on SIGHUP, so no service restart is needed.
 - DNS is demoted only when there is somewhere to switch to.
 
+### MBIM link without DNS (`mbim_lost_dns`, `mbim_dns_fix`, lib.sh)
+
+`mbim.sh` of OpenWrt 25.12.6 (umbim commit 152b86e6ab) passes the network's DNS servers to `<iface>_4` / `_6` only with `dhcp=1`. `dhcp` defaults to `auto`, so a default MBIM link comes up with an address and a route but no resolver: ping by IP works, names do not resolve, dnsmasq answers REFUSED. 25.12.5 and earlier are not affected; OpenWrt main fixed it in b556a45351 (servers go to the parent with `proto_add_dns_server`).
+
+The app fills the gap only in that exact state: proto `mbim`, `peerdns` not 0, the link up, and no `dns-server` on the interface or its `_4` / `_6` children (a fixed `mbim.sh` or a `dns` option both leave it alone). The servers come from the last `mbim[pid] Setting up` block of netifd's log for that interface; when the log has rotated, from `AT+CGCONTRDP`, taking the context whose address is the link's own (the cdc-wdm node belongs to umbim and is not touched). The answer is cached per connection, keyed by the link address, a negative one too. The block is written as `# Interface <iface>_4`, so `_dns_restore` and `_dns_demote` treat it like netifd's own, and dnsmasq gets SIGHUP. netifd rewrites the file on every interface event, so `enforce` repeats it every round, and the ifup hotplug (`health.sh dnsfix`, runs with the watchdog off too) closes the gap right after connect. Writers are serialised by `flock` on `/tmp/5gmodem/mbimdns.lock` (busybox `flock` has no `-w`).
+
 ### Turning the watchdog off (`_off_cleanup`, `_teardown`)
 
 Turning the watchdog off used to stop the ticks but leave the +1000 penalties and the state files in place, so traffic could stay away forever from a link that had recovered long ago. Now every known link gets its uci metric back (exactly what netifd would do on its next event), and the state directory is deleted. Ladder steps already started are atomic (`ifdown; sleep; ifup` in one subshell) and finish by themselves. The cleanup has to run under the lock. The tick/once prologue reaches it without going through `round`, so it fills the `_HDUMP` snapshot itself. Otherwise `iface_dev` would return empty and the penalties would stay.
@@ -116,7 +122,7 @@ If MM reports the modem as `initializing`, `enabling`, `connecting` or `disconne
 
 - **Common cause.** If several links are watched and all of them are down at once, the cause is almost certainly not the modems (dead probe targets, upstream router, regional operator outage). Rebooting every modem would only cause damage. A single link is always healed, because a one-modem router has nothing to compare against.
 - **Probes blocked by the firewall** (see `probe_proxy`). Even a single link is not healed. Otherwise, with a VPN killswitch, a one-modem router would climb to `CFUN=1,1` on a healthy modem.
-- **SIM absent (`sim_absent`)**, checked before every attempt. HiLink: API `SimStatus` (1 = present, 255/0 = absent). MM: the failed reason in the modem record. AT: a short `CPIN` through the port queue. Only a confident "no card" returns 0. Silence or a busy port does not block healing. With no card, the attempt is not counted and the event is logged once per episode.
+- **SIM absent**, checked by the shared SIM wait mechanism before the recovery counter and cooldown. See [Waiting for a SIM](#waiting-for-a-sim).
 - **Operator cut off the traffic.** If the interface **has an address**, the session is established: SIM alive, registered, bearer up. The operator is cutting the traffic (quota used up, zero balance, block). Reboot, USB power cycle and ifup cannot fix that. In one case (Aug 2026) the ladder rebooted a healthy EP06 three times and then kept burning attempts at "Reconnect (3/6)". So the ladder stops completely: the attempt is not counted, the ladder is reset, and the event is logged once. When the address disappears, the mark is cleared. Stuck sessions that keep an address are handled by sessionwatch, which compares the address with the modem.
   - **The address in netifd is not the address on the device.** Protocols with `proto_set_keep 1` (qmiraw and similar) keep the interface "up" after the modem left the bus and came back. ubus still shows the old address, but the netdev is DOWN and empty. Reading only ubus stopped healing forever (EC21, Sep 2026). The address is checked in the kernel on the l3 device.
   - **Exception: fallen back to 2G.** "Address but no traffic" on GSM/EDGE is a radio failure, not a quota limit. LTE was lost and there is practically no data on 2G (SIM7100E stuck overnight on EGSM 900, Aug 2026). A module reboot brings LTE back. The mode comes from a fresh metrics snapshot. A stale snapshot does not change the decision.
@@ -363,3 +369,63 @@ A HiLink modem has no AT channel, so it is rebooted through its own API. Without
 - Targets are sanitized to `[A-Za-z0-9.:-]`, because they go to a shell verb as one argument.
 - The `once` call after save is wrapped in `L.resolveDefault`. The round is blocking and longer than the 20 s XHR limit with three uplinks, and an unhandled reject showed an error over the page (Sep 2026 audit).
 - Autosave debounces 500 ms (checkbox + select = one backend call) and listens to `change`, `widget-change` (luci-base widgets) and `cbi-dynlist-change` (DynamicList).
+
+## Interfaces the user switched off
+
+Healing skips an interface with `auto=0` or `disabled=1`. This holds both when netifd reports
+`autostart: false` and when the interface is missing from the netifd dump altogether (a disabled
+interface is not listed there).
+
+## Waiting for a SIM
+
+`simwait.sh` shares SIM absence state between sessionwatch, health recovery and the
+bundled fibocom, qmiraw and mbimp protocol setup handlers. Sessionwatch checks
+registered modem interfaces every round (normally 30 seconds), including modems
+owned by ModemManager. Confirmed absence pauses automatic connection and recovery.
+The protocol error is `SIM_MISSING`. Netifd temporarily marks the interface
+unavailable through its runtime notification API, stopping a pending or stale
+connection while preserving autostart intent. Persistent UCI enable/auto settings
+are never changed. The bundled protocol setup handlers also block restart when
+their preflight detects absence. Protocols supplied by OpenWrt retain their native
+initialization and SIM handling.
+
+State sources are queued raw `AT+CPIN?`, the owning ModemManager record (including
+MBIM+MM cooperative operation), HiLink SIM
+status, or an idle QMI/MBIM control channel associated with the same physical modem.
+Only explicit absence is accepted. PIN/PUK, illegal SIM state, generic errors,
+missing answers and busy control channels are distinct from absence. An empty UIM
+object from uqmi does not establish absence: it skips cards whose state is not
+present, including card errors. The fallback qmicli card-status query requires
+explicit absent states for all reported slots. Control queries
+are bounded and skipped when another control client is active. No vendor SIM-detect
+configuration or unsolicited-response listener is enabled.
+
+After confirmed absence, unknown replies keep the interface waiting. A ready SIM
+restores availability and starts normal netifd setup once, clearing that interface's recovery counters,
+even if recovery previously exhausted its attempt limit. A PIN-locked inserted
+card may enter normal setup when a PIN is configured; otherwise it keeps waiting.
+An unsuccessful ubus bring-up retains the wait marker for the next round. A
+120-second grace period after resuming prevents health and sessionwatch from
+restarting a connection that netifd has just begun. New confirmed absence cancels
+that grace period.
+
+Manual stops with no protocol error, removed hardware and changed modem identities
+clear the wait marker without starting a connection. A configuration-disabled
+interface stays dormant until enabled by the user. Connected interfaces are checked
+too: hot SIM removal may leave an old address and an incorrect up state in netifd.
+Only confirmed absence interrupts that stale connection. Healthy connections and
+other interfaces are left alone. Per-interface locks
+serialize preflight checks and the watcher, and identity/status files are replaced
+atomically. Waiting resumes independently of the health monitor's enabled setting.
+
+`simwait.sh status <interface>` returns cached JSON with `sim_state` set to
+`absent`, `locked`, `ready` or `unknown`, and boolean `waiting_sim`. Observations
+older than 90 seconds become unknown. The normal AT/ModemManager metric snapshot
+includes these two fields as well. The status command performs no modem query.
+This is a connection-policy observation, so a healthy interface that is not being
+checked can report unknown. HiLink consumers can use the status command alongside
+their existing API output.
+
+Automatic reconnection requires the modem itself to recognize an inserted SIM.
+Boards or firmware without working hot insertion may still require their normal
+reinitialization procedure. No speculative modem reset is performed while waiting.

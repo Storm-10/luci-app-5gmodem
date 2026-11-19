@@ -536,6 +536,7 @@ function renderNeighbors(json) {
 	if (!list.length) {
 		if (json && json.backend === 'android') { wrap.style.display = 'none'; return; }
 		if (wrap.getAttribute('data-hadata') !== '1') { wrap.style.display = 'none'; }
+		else { nbLockNote(json); }
 		return;
 	}
 	wrap.style.display = '';
@@ -573,26 +574,69 @@ function renderNeighbors(json) {
 		paintMetricCell(td[6], 'rssi', c.rssi, null, undefined, c.rsrq);
 		if (td[7]) { nbLockCell(td[7], c, serving); }
 	}
+	nbLockNote(json);
+}
+
+function _nbSame(lk, ear, pci) {
+	return !!lk && String(lk.ear) === String(ear) && (lk.pci == null || String(lk.pci) === String(pci));
+}
+
+// One place for the lock: state, Unlock, and a warning when the modem stays on another cell.
+function nbLockNote(json) {
+	var wrap = document.getElementById('nb-comp');
+	if (!wrap) { return; }
+	var box = document.getElementById('nb-locknote');
+	if (!box) { box = E('div', { 'id': 'nb-locknote', 'style': 'margin-top:.4em' }); wrap.appendChild(box); }
+	var lk = bandsui.lockedCell ? bandsui.lockedCell() : null;
+	var busy = bandsui.opActive && bandsui.opActive();
+	if (!lk || busy) { box.style.display = 'none'; box.removeAttribute('data-sig'); return; }
+	var se = String((json || {}).earfcn || ''), sp = String((json || {}).pci || '');
+	var known = se && se !== '-' && sp && sp !== '-';
+	var off = known && !_nbSame(lk, se, sp);
+	var sig = [ lk.ear, lk.pci, off ? se + '/' + sp : '' ].join('|');
+	box.style.display = '';
+	if (box.getAttribute('data-sig') === sig) { return; }
+	box.setAttribute('data-sig', sig);
+	var kids = [
+		E('span', { 'style': 'margin-right:.6em' }, [ lk.pci != null
+			? _('Locked to cell: EARFCN %s, PCI %s').format(lk.ear, lk.pci)
+			: _('Locked to frequency: EARFCN %s').format(lk.ear) ]),
+		E('button', {
+			'class': 'btn cbi-button cbi-button-negative',
+			'style': 'padding:1px 9px',
+			'title': _('Locked to this cell. Click to unlock'),
+			'click': function(ev) { ev.preventDefault(); bandsui.unlockCell(); }
+		}, [ _('Unlock cell') ])
+	];
+	if (off) {
+		kids.push(E('div', { 'class': 'tg-nb-lockwarn' }, [
+			_('The modem is still on EARFCN %s, PCI %s: the lock has not taken effect. The cell may be out of reach.').format(se, sp)
+		]));
+	}
+	dom.content(box, kids);
 }
 
 function nbLockCell(td, c, serving) {
 	var ear = c.earfcn, pci = c.pci;
-	var can = bandsui.cellLockWritable && bandsui.cellLockWritable()
-		&& !serving && ear && ear !== '-' && pci != null && pci !== '' && pci !== '-';
-	if (!can) {
+	var ok = ear && ear !== '-' && pci != null && pci !== '' && pci !== '-';
+	var here = ok && _nbSame(bandsui.lockedCell && bandsui.lockedCell(), ear, pci);
+	var can = ok && bandsui.cellLockWritable && bandsui.cellLockWritable();
+	if (!can && !here) {
 		if (td.getAttribute('data-lk')) { td.removeAttribute('data-lk'); dom.content(td, ''); }
 		return;
 	}
-	var key = ear + ':' + pci;
+	var key = ear + ':' + pci + (here ? ':on' : '');
 	if (td.getAttribute('data-lk') === key) { return; }
 	td.setAttribute('data-lk', key);
 	var btn = E('button', {
-		'class': 'btn cbi-button cbi-button-action',
-		'style': 'padding:1px 9px;display:inline-flex;align-items:center;justify-content:center',
-		'title': _('Lock to this cell (EARFCN %s, PCI %s)').format(ear, pci),
-		'click': function(ev) { ev.preventDefault(); bandsui.lockCell(ear, pci); }
+		'class': 'btn cbi-button ' + (here ? 'cbi-button-negative' : 'cbi-button-action'),
+		'style': 'padding:1px 9px;display:inline-flex;align-items:center;justify-content:center;gap:.35em;white-space:nowrap',
+		'title': here ? _('Locked to this cell. Click to unlock')
+			: _('Lock to this cell (EARFCN %s, PCI %s)').format(ear, pci),
+		'click': function(ev) { ev.preventDefault(); if (here) { bandsui.unlockCell(); } else { bandsui.lockCell(ear, pci); } }
 	});
-	btn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><rect x="5" y="11" width="14" height="10" rx="1"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4M12 15v2"></path></svg>';
+	btn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block;flex:none"><rect x="5" y="11" width="14" height="10" rx="1"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>';
+	btn.appendChild(E('span', {}, [ here ? _('Unlock cell') : _('Lock cell') ]));
 	dom.content(td, btn);
 }
 
@@ -626,8 +670,11 @@ function renderCaTable(json) {
 	var caSum = document.getElementById('ca-sum');
 	if (caSum) {
 		var ca = caSummary(json);
-		var caTxt = ca.n > 1 ? ca.n + 'CA' + (ca.bw ? ' · ' + ca.bw + ' MHz' : '') : '';
-		if (caSum.textContent !== caTxt) { caSum.textContent = caTxt; caSum.title = ca.n > 1 ? caTip(ca) : ''; }
+		// "B3+B1": carriers the modem also uploads on (FM350 reports it per secondary carrier)
+		var ul = /^[Bn]\d+(\+[Bn]\d+)+$/.test(String(json.ulcc || '')) ? String(json.ulcc) : '';
+		var caTxt = ca.n > 1 ? ca.n + 'CA' + (ca.bw ? ' · ' + ca.bw + ' MHz' : '') + (ul ? ' · UL ' + ul : '') : '';
+		var caTitle = ca.n > 1 ? caTip(ca) + (ul ? '\n' + _('Upload is aggregated too: %s').format(ul) : '') : '';
+		if (caSum.textContent !== caTxt || caSum.title !== caTitle) { caSum.textContent = caTxt; caSum.title = caTitle; }
 		caSum.style.display = caTxt ? '' : 'none';
 	}
 	if (hasPcc) {
@@ -713,6 +760,20 @@ var mmIdx = '';
 var ifaceProtoIsMM = false;
 var ledsAvail = false;
 var pageModemPath = '';
+
+// Write actions wait for a tab switch still running on the router (modemswitch.sh switch takes
+// seconds): the scripts act on uci active_modem, which is the previous modem until it returns.
+// Every write also names the page modem (for=<usb path>, read when the action starts), so it
+// cannot land on another modem when active_modem is not the one shown. Only for scripts that
+// take for=: reboot_modem.sh and "setopt.sh reconnect" here.
+function forArgs(args) {
+	return pageModemPath ? (args || []).concat([ 'for=' + pageModemPath ]) : args;
+}
+function execW(bin, args) {
+	var p = window.__5gmSwitchP || Promise.resolve();
+	var a = forArgs(args);
+	return p.then(function() { return fs.exec(bin, a); });
+}
 var pollTickFn = null;
 
 function resetStickyForModem() {
@@ -795,6 +856,7 @@ function switchModemInPlace(path) {
 	loadMmIdx();
 	if (modemtabs.refreshEsimTab) { modemtabs.refreshEsimTab(); }
 	if (modemtabs.refreshUssdTab) { modemtabs.refreshUssdTab(); }
+	if (modemtabs.refreshGpsTab) { modemtabs.refreshGpsTab(); }
 	L.resolveDefault(fs.exec_direct('/usr/share/5gmodem/5gmodem.sh', [ 'peek', pageModemPath ]), '{}')
 		.then(function(out) {
 			var j = null; try { j = JSON.parse(out); } catch (e) {}
@@ -1486,7 +1548,7 @@ function mapPinButton(c4, label) {
 
 function rebootModem(hard) {
 	if (hard) { setModemBusy(_('The modem is restarting…'), 90); }
-	return fs.exec('/usr/share/5gmodem/reboot_modem.sh', [ hard ? 'hard' : 'soft' ]).then(function(res) {
+	return execW('/usr/share/5gmodem/reboot_modem.sh', [ hard ? 'hard' : 'soft' ]).then(function(res) {
 		var d = {}; try { d = JSON.parse((res && res.stdout) || '{}'); } catch (e) {}
 		if (d.success === false) {
 			if (hard) { clearModemBusy(true); }
@@ -1508,7 +1570,7 @@ function rebootModem(hard) {
 var _powerRebootMode = 'power';
 function rebootModemPower() {
 	setModemBusy(_('The modem is restarting…'), 120);
-	return fs.exec('/usr/share/5gmodem/reboot_modem.sh', [ _powerRebootMode ]).then(function(res) {
+	return execW('/usr/share/5gmodem/reboot_modem.sh', [ _powerRebootMode ]).then(function(res) {
 		var d = {}; try { d = JSON.parse((res && res.stdout) || '{}'); } catch (e) {}
 		if (d.success === false) {
 			clearModemBusy(true);
@@ -1528,10 +1590,10 @@ function rebootModemPower() {
 function initPowerBtn() {
 	var b = document.getElementById('btn-power-reboot');
 	if (!b) { return; }
-	L.resolveDefault(fs.exec_direct('/usr/share/5gmodem/reboot_modem.sh', [ 'haspower' ]), '').then(function(out) {
+	L.resolveDefault(fs.exec_direct('/usr/share/5gmodem/reboot_modem.sh', forArgs([ 'haspower' ])), '').then(function(out) {
 		var g = ''; try { g = (JSON.parse(out || '{}').gpio) || ''; } catch (e) {}
 		if (g) { _powerRebootMode = 'power'; b.style.display = ''; return; }
-		return L.resolveDefault(fs.exec_direct('/usr/share/5gmodem/reboot_modem.sh', [ 'hasusbpower' ]), '').then(function(out2) {
+		return L.resolveDefault(fs.exec_direct('/usr/share/5gmodem/reboot_modem.sh', forArgs([ 'hasusbpower' ])), '').then(function(out2) {
 			var m = ''; try { m = (JSON.parse(out2 || '{}').method) || ''; } catch (e) {}
 			if (m) { _powerRebootMode = 'usbpower'; b.style.display = ''; }
 		});
@@ -2049,22 +2111,22 @@ function runDoctor(btn) {
 	}
 	mark(l1, false, _('No connection'));
 	var l2 = line(_('Reconnecting…'));
-	fs.exec('/usr/share/5gmodem/setopt.sh', [ 'reconnect' ]).then(function() {
+	execW('/usr/share/5gmodem/setopt.sh', [ 'reconnect' ]).then(function() {
 		return doctorWait(35);
 	}).then(function(ok) {
 		if (ok) { mark(l2, true, _('Done — the internet is back')); finish(); return; }
 		mark(l2, false, _('Did not help'));
 		var l3 = line(_('Restarting the modem…'));
-		return fs.exec('/usr/share/5gmodem/reboot_modem.sh', [ 'soft' ]).then(function() {
+		return execW('/usr/share/5gmodem/reboot_modem.sh', [ 'soft' ]).then(function() {
 			return doctorWait(80);
 		}).then(function(ok2) {
 			if (ok2) { mark(l3, true, _('Done — the internet is back')); finish(); return; }
 			mark(l3, false, _('Did not help'));
-			return L.resolveDefault(fs.exec_direct('/usr/share/5gmodem/reboot_modem.sh', [ 'hasusbpower' ]), '').then(function(out) {
+			return L.resolveDefault(fs.exec_direct('/usr/share/5gmodem/reboot_modem.sh', forArgs([ 'hasusbpower' ])), '').then(function(out) {
 				var m = ''; try { m = (JSON.parse(out || '{}').method) || ''; } catch (e) {}
 				if (!m) { giveup(); return; }
 				var l4 = line(_('Power-cycling the modem over USB…'));
-				return fs.exec('/usr/share/5gmodem/reboot_modem.sh', [ 'usbpower' ]).then(function() {
+				return execW('/usr/share/5gmodem/reboot_modem.sh', [ 'usbpower' ]).then(function() {
 					return doctorWait(120);
 				}).then(function(ok3) {
 					if (ok3) { mark(l4, true, _('Done — the internet is back')); finish(); }
@@ -2341,8 +2403,7 @@ function applyMetrics(json) {
 						var mv = String(json.mode || '').trim();
 						var _mibR = document.getElementById('modem-info-block');
 						if (_mibR && mutil.ratFill) {
-							if (uci.get('5gmodem', '@5gmodem[0]', 'rat_card') === '0') { _mibR.removeAttribute('data-rat'); }
-							else { _mibR.setAttribute('data-rat', mutil.ratFill(mv)); }
+							_mibR.setAttribute('data-rat', mutil.ratFill(mv));
 						}
 						if (mv && mv != '-') {
 							var mtext = mutil.formatModeDisplay(mv).replace(/[&<>]/g, function(c) {
@@ -2928,7 +2989,7 @@ simDialog: baseclass.extend({
 	
 	load: function() {
 		var self = this, args = arguments;
-		return fresh.check(30943, [ bandsui, extip, modemtabs, mutil, netpri, healthform, netarrange, mobileview ]).then(function() { return self._load5g.apply(self, args); });
+		return fresh.check(40008, [ bandsui, extip, modemtabs, mutil, netpri, healthform, netarrange, mobileview ]).then(function() { return self._load5g.apply(self, args); });
 	},
 
 	_load5g: function() {
@@ -3213,7 +3274,7 @@ simDialog: baseclass.extend({
 					E('div', { 'class': 'tginfo-simslot-row' }, [
 						(function() {
 							var _env = E('a', { 'id': 'smsenv', 'class': 'tg-smsenv',
-								'href': L.url('admin/modem/5gmodem/readsms'),
+								'href': L.url('admin/modem/5gmodem/sms'),
 								'title': _('Unread SMS — open Incoming'),
 								'style': 'display:none' }, []);
 							_env.innerHTML = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="m3 7 9 6 9-6"></path></svg>';
@@ -3434,7 +3495,7 @@ simDialog: baseclass.extend({
 							E('th', { 'class': 'th' }, [ gl('RSRP') ]),
 							E('th', { 'class': 'th' }, [ gl('RSRQ') ]),
 							E('th', { 'class': 'th' }, [ gl('RSSI') ]),
-							E('th', { 'class': 'th' }, [ '' ]),
+							E('th', { 'class': 'th', 'title': _('Cell lock') }, [ _('Lock') ]),
 						])
 					])
 				]),

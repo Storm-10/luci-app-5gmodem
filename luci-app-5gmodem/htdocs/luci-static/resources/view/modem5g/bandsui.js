@@ -5,6 +5,18 @@
 'require uci';
 'require view.modem5g.mutil as mutil';
 
+// Write actions wait for a tab switch still running on the router (modemswitch.sh switch takes
+// seconds): the scripts act on uci active_modem, which is the previous modem until it returns.
+// Every write also names the page modem (for=<usb path>, read when the action starts), so it
+// cannot land on another modem when active_modem is not the one shown. Only for scripts that
+// take for=: bands.sh here.
+function execW(bin, args) {
+	var p = window.__5gmSwitchP || Promise.resolve();
+	var path = (ctx && ctx.pagePath && ctx.pagePath()) || '';
+	var a = path ? (args || []).concat([ 'for=' + path ]) : args;
+	return p.then(function() { return fs.exec(bin, a); });
+}
+
 var ctx = null;
 
 var _bandsAfterBusy = false;
@@ -32,17 +44,19 @@ function _bandsOpActive() {
 }
 
 function _bandsOpStart(args, msg) {
-	if (_bandsOpActive()) { return; }
+	if (_bandsOpActive()) { return false; }
 	ctx.setModemBusy(msg);
 	_bandsAfterBusy = true;
 	_bandsOpAt = Date.now();
-	L.resolveDefault(fs.exec('/usr/share/5gmodem/bands.sh', args), {}).then(function(res) {
+	L.resolveDefault(execW('/usr/share/5gmodem/bands.sh', args), {}).then(function(res) {
 		if (!res || typeof res.code !== 'number' || res.code === 0) { return; }
 		_bandsAfterBusy = false;
+		if (args[0] === 'setcelllock') { _lockMem = null; }
 		ctx.clearModemBusy(true);
 		var why = String(res.stdout || res.stderr || '').trim();
 		ui.addNotification(null, E('p', [ _('Failed to set network mode') + (why ? ': ' + why : '') ]), 'error');
 	});
+	return true;
 }
 
 var BAND_KIND = { 'bands-lte': 'lte', 'bands-nr': 'nr', 'bands-3g': 'umts', 'bands-2g': 'gsm' };
@@ -439,30 +453,47 @@ function render256qam(state) {
 	}
 }
 
-function renderUlca(state) {
+function renderUlca(state, saved) {
 	var row = _ensureRow('ulcan', 'ulca-cell', _('Uplink aggregation'), 'caenn');
 	var cell = document.getElementById('ulca-cell');
 	if (!row || !cell) { return; }
 	if (state !== 'on' && state !== 'off') { row.style.display = 'none'; return; }
 	row.style.display = '';
-	if (ctx.sameRender(cell, 'ulca|' + state)) { return; }
+	if (ctx.sameRender(cell, 'ulca|' + state + '|' + (saved ? 1 : 0))) { return; }
 	cell.innerHTML = '';
 
 	if (state === 'on') {
 		cell.appendChild(E('span', {}, _('Enabled')));
+		if (saved) {
+			var note = E('span', { 'style': 'opacity:.65; font-size:90%; margin-left:.6em' },
+				_('Turned on again after every modem restart'));
+			var stop = E('button', {
+				'class': 'btn cbi-button',
+				'style': 'margin-left:.6em',
+				'click': ui.createHandlerFn(this, function() {
+					// only the saved choice goes: the modem has no command to turn it off
+					return L.resolveDefault(execW('/usr/share/5gmodem/bands.sh', [ 'setulca', 'forget' ]), null).then(function() {
+						if (note.parentNode) { note.parentNode.removeChild(note); }
+						if (stop.parentNode) { stop.parentNode.removeChild(stop); }
+					});
+				})
+			}, _('Stop turning it on'));
+			cell.appendChild(note);
+			cell.appendChild(stop);
+		}
 		return;
 	}
 	cell.appendChild(E('button', {
 		'class': 'btn cbi-button cbi-button-apply',
 		'click': ui.createHandlerFn(this, function() {
 			_runBands([ 'setulca', 'on' ],
-				_('Enabling uplink aggregation — the modem is restarting its radio…'));
+				_('Enabling uplink aggregation — the modem reconnects to the network…'));
 		})
 	}, _('Enable')));
 	cell.appendChild(E('span', { 'style': 'margin-left:.6em; color:#e58a00' },
 		_('Disabled in modem')));
 	cell.appendChild(E('span', { 'style': 'opacity:.65; font-size:90%; margin-left:.6em' },
-		_('Upload often sits at 1-2 Mbit/s until this is on')));
+		_('Upload often sits at 1-2 Mbit/s until this is on. The choice is kept and applied again after a modem restart; the gain depends on the operator.')));
 }
 
 function render5gMode(state) {
@@ -500,9 +531,31 @@ function render5gMode(state) {
 }
 
 var _cellLockWritable = false;
+// Lock state for the Neighbour cells table: the last bands answer, else what this page just
+// sent (the bands block may be collapsed and never reload), else the uci stamp bands.sh keeps.
+var _cellLockState = null;
+var _lockMem = null;
 
 function _runBands(args, msg) {
-	_bandsOpStart(args, msg);
+	return _bandsOpStart(args, msg);
+}
+
+function _parseLock(s) {
+	var p = String(s || '').split(' ');
+	if (p[0] === 'cell' && p[1]) { return { ear: p[1], pci: p[2] }; }
+	if (p[0] === 'arfcn' && p[1]) { return { ear: p[1], pci: null }; }
+	return null;
+}
+
+function lockedCell() {
+	if (_lockMem !== null) { return _lockMem || null; }
+	if (_cellLockState !== null) { return _parseLock(_cellLockState); }
+	var st = '';
+	try {
+		var ap = (ctx.pagePath && ctx.pagePath()) || uci.get('5gmodem', '@5gmodem[0]', 'active_modem') || '';
+		st = ap ? (uci.get('5gmodem', 'm_' + ap.replace(/[^A-Za-z0-9]/g, '_'), 'celllock') || '') : '';
+	} catch (e) {}
+	return _parseLock(st);
 }
 
 function lockCell(ear, pci) {
@@ -510,13 +563,24 @@ function lockCell(ear, pci) {
 		ui.addNotification(null, E('p', _('Cell EARFCN/PCI unknown yet - try again in a few seconds')), 'warning');
 		return;
 	}
-	_runBands([ 'setcelllock', 'cell', String(ear), String(pci) ],
-		_('Locking to cell EARFCN %s, PCI %s - the modem re-registers...').format(ear, pci));
+	if (_runBands([ 'setcelllock', 'cell', String(ear), String(pci) ],
+		_('Locking to cell EARFCN %s, PCI %s - the modem re-registers...').format(ear, pci))) {
+		_lockMem = { ear: String(ear), pci: String(pci) };
+	}
+}
+
+function unlockCell() {
+	if (_runBands([ 'setcelllock', 'off' ],
+		_('Removing the lock - the modem restarts, connection drops for a while...'))) {
+		_lockMem = false;
+	}
 }
 
 function renderCellLock(state) {
 	var _clp = String(state || '').split(' ');
 	_cellLockWritable = !!state && state !== 'Unsupported' && _clp[_clp.length - 1] !== 'readonly';
+	_cellLockState = state || null;
+	if (state && !_bandsOpActive()) { _lockMem = null; }
 	var row = document.getElementById('celllockn');
 	var cell = document.getElementById('celllock-cell');
 	if (!row || !cell) { return; }
@@ -548,15 +612,10 @@ function renderCellLock(state) {
 		return;
 	}
 
-	var run = _runBands;
-
 	if (locked || unlockable) {
 		cell.appendChild(E('button', {
 			'class': 'btn cbi-button cbi-button-reset',
-			'click': ui.createHandlerFn(this, function() {
-				return run([ 'setcelllock', 'off' ],
-					_('Removing the lock - the modem restarts, connection drops for a while...'));
-			})
+			'click': ui.createHandlerFn(this, function() { unlockCell(); })
 		}, [ (locked ? _('Unlock') : _('Reset cell lock')) ]));
 	}
 	if (!locked) {
@@ -572,8 +631,7 @@ function renderCellLock(state) {
 								_('Serving cell is unknown yet - try again in a few seconds')), 'warning');
 							return;
 						}
-						return run([ 'setcelllock', 'cell', String(ear), String(pci) ],
-							_('Locking to cell EARFCN %s, PCI %s - the modem re-registers...').format(ear, pci));
+						lockCell(ear, pci);
 					});
 			})
 		}, [ _('Lock to current cell') ]));
@@ -592,6 +650,9 @@ function renderCellLock(state) {
 			'style': 'opacity:.65; font-size:90%; margin-left:.6em'
 		}, _('(after modem restart the lock stays in effect, but the modem reports it as off)')));
 	}
+	cell.appendChild(E('div', {
+		'style': 'opacity:.65; font-size:90%; margin-top:.3em'
+	}, _('Any cell from the Neighbour cells table can be locked with the lock button in its row.')));
 	cell.appendChild(_cellLockCaNote());
 }
 
@@ -694,7 +755,7 @@ function applyVendorJson(j) {
 		renderCellLock(j.celllock);
 		renderCellLock5g(j.celllock5g);
 		render256qam(j.qam256);
-		renderUlca(j.ulca);
+		renderUlca(j.ulca, j.ulca_saved);
 		var hasBands = (j.supported && j.supported.length) ||
 		               (j.supported5gnsa && j.supported5gnsa.length) ||
 		               (j.supported5gsa && j.supported5gsa.length);
@@ -997,7 +1058,7 @@ function applyBandsModemband(reset, confirmed) {
 	if (hasTwo && (reset || two.length)) { args.push('2g=' + (reset ? 'default' : two.join(' '))); }
 	if (args.length < 2) { return Promise.resolve(); }
 	var key = _applyKeyNow();
-	return fs.exec('/usr/share/5gmodem/bands.sh', args).then(function(res) {
+	return execW('/usr/share/5gmodem/bands.sh', args).then(function(res) {
 		var d = null;
 		try { d = JSON.parse(String((res && res.stdout) || '').trim()); } catch (e) { d = null; }
 		if (!d || !d.id) {
@@ -1041,12 +1102,12 @@ function applyBands() {
 		ui.addNotification(null, E('p', _('ModemManager does not manage this modem')), 'error');
 		return Promise.resolve();
 	}
-	return fs.exec('/usr/share/5gmodem/bands.sh', [ 'mmsetbands', bandsOther.concat(sel).filter(Boolean).join('|'), String(ctx.getMmIdx()) ]).then(function(res) {
+	return execW('/usr/share/5gmodem/bands.sh', [ 'mmsetbands', bandsOther.concat(sel).filter(Boolean).join('|'), String(ctx.getMmIdx()) ]).then(function(res) {
 		if (res.code !== 0) {
 			ui.addNotification(null, E('p', [ _('Failed to set bands') + ': ' + (res.stderr || res.stdout || '') ]), 'error');
 			return false;
 		}
-		return nrAt ? fs.exec('/usr/share/5gmodem/bands.sh', [ 'setbands5gnsa', nrSel.join(' ') ]) : true;
+		return nrAt ? execW('/usr/share/5gmodem/bands.sh', [ 'setbands5gnsa', nrSel.join(' ') ]) : true;
 	}).then(function(res2) {
 		if (res2 === false) { return; }
 		if (res2 !== true && res2.code !== 0) {
@@ -1080,7 +1141,7 @@ function setNetMode(allowed, preferred, label) {
 	var isAuto = (allowed == '2g|3g|4g|5g' && preferred == '5g');
 	var args = isAuto ? [ 'setmodemm', 'default' ]
 		: (preferred ? [ 'setmodemm', allowed, preferred ] : [ 'setmodemm', allowed ]);
-	return fs.exec('/usr/share/5gmodem/bands.sh', args).then(function(res) {
+	return execW('/usr/share/5gmodem/bands.sh', args).then(function(res) {
 		ui.hideModal();
 		if (res.code === 0 && /"error"/.test(String(res.stdout || ''))) { res.code = 1; }
 		if (res.code === 0) {
@@ -1123,7 +1184,7 @@ function setNetModeAT(id, label) {
 
 function applyNetModeAT(id, label) {
 	ui.showModal(null, E('p', { 'class': 'spinning' }, _('Applying network mode...')));
-	return fs.exec('/usr/share/5gmodem/bands.sh', [ 'setmode', String(id) ]).then(function(res) {
+	return execW('/usr/share/5gmodem/bands.sh', [ 'setmode', String(id) ]).then(function(res) {
 		ui.hideModal();
 		if (res && typeof res.code === 'number' && res.code !== 0) {
 			ui.addNotification(null, E('p', [ _('Failed to set network mode') + ': ' + String(res.stdout || res.stderr || '').trim() ]), 'error');
@@ -1143,7 +1204,7 @@ function applyNetModeAT(id, label) {
 
 function setBands3gAT(id, label) {
 	ui.showModal(null, E('p', { 'class': 'spinning' }, _('Applying 3G bands...')));
-	return fs.exec('/usr/share/5gmodem/bands.sh', [ 'setbands3g', String(id) ]).then(function(res) {
+	return execW('/usr/share/5gmodem/bands.sh', [ 'setbands3g', String(id) ]).then(function(res) {
 		ui.hideModal();
 		if (res && typeof res.code === 'number' && res.code !== 0) {
 			ui.addNotification(null, E('p', [ _('Failed to set 3G bands') + ': ' + String(res.stdout || res.stderr || '').trim() ]), 'error');
@@ -1200,7 +1261,7 @@ function ungate() {
 function setOther(list) { bandsOther = list || []; }
 
 return baseclass.extend({
-	API: 30943,
+	API: 40008,
 	mtkPackagePrompt: mtkPackagePrompt,
 	init: function(c) { ctx = c; },
 	loadBands: function() { return loadBands(); },
@@ -1215,6 +1276,9 @@ return baseclass.extend({
 	renderCellLock: function(st) { return renderCellLock(st); },
 	cellLockWritable: function() { return _cellLockWritable; },
 	lockCell: function(e, p) { return lockCell(e, p); },
+	unlockCell: function() { return unlockCell(); },
+	lockedCell: function() { return lockedCell(); },
+	opActive: function() { return _bandsOpActive(); },
 	render5gMode: function(st) { return render5gMode(st); },
 	renderCaEnabled: function(st) { return renderCaEnabled(st); },
 	onModemBusyCleared: onModemBusyCleared,
@@ -1240,6 +1304,6 @@ return baseclass.extend({
 		});
 		window.__hwSig = null;
 		window.setTimeout(loadBands, 300);
-		render5gMode(null); renderCaEnabled(null); renderCellLock(null);
+		render5gMode(null); renderCaEnabled(null); renderCellLock(null); _lockMem = null;
 	}
 });

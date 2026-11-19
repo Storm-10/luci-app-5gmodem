@@ -511,6 +511,9 @@ if [ -n "$_POLL_AM" ] \
 			_rt_bd=$(printf '%s' "$_rt" | jsonfilter -e '@.band' 2>/dev/null)
 			_rt_ca=$(printf '%s' "$_rt" | jsonfilter -e '@.ca' 2>/dev/null)
 			_rt_tp=$(printf '%s' "$_rt" | jsonfilter -e '@.temp' 2>/dev/null)
+			# per-sensor list from a device running this app; only "name=number" pairs are kept
+			_rt_tps=$(printf '%s' "$_rt" | jsonfilter -e '@.temps' 2>/dev/null | tr ' ' '\n' | grep -E '^[a-z]{1,12}=-?[0-9]{1,3}(\.[0-9])?$' | head -8 | tr '\n' ' ')
+			_rt_tps=${_rt_tps% }
 			_rt_ml=$(printf '%s' "$_rt" | jsonfilter -e '@.model' 2>/dev/null | tr -d '"\\')
 			_rt_ph=$(printf '%s' "$_rt" | jsonfilter -e '@.phone' 2>/dev/null | tr -cd '+0-9')
 			_rt_pr=dhcp
@@ -541,13 +544,13 @@ if [ -n "$_POLL_AM" ] \
 				[ -n "$_rt_x" ] && { _rt_rx="${_rt_x%%|*}"; _rt_tx="${_rt_x##*|}"; }
 			fi
 			_rt_tmp="$CACHE.r$$"
-			printf '{"backend":"router","protocol":"%s","iface_proto":"%s","path":"%s","vidpid":"%s:%s","modem":"%s","operator_name":"%s","registration":"1","mode":"%s","pband":"%s","signal":"%s","rsrp":"%s","rsrq":"%s","sinr":"%s","mtemp":"%s","phone":"%s","conn_time":"%s","conn_time_sec":"%s","conn_time_since":"%s","rx":"%s","tx":"%s","iface":"%s","ipaddr":"%s","tether":"router","tether_state":"ready","gateway":"%s","netdev":"%s"}\n' \
+			printf '{"backend":"router","protocol":"%s","iface_proto":"%s","path":"%s","vidpid":"%s:%s","modem":"%s","operator_name":"%s","registration":"1","mode":"%s","pband":"%s","signal":"%s","rsrp":"%s","rsrq":"%s","sinr":"%s","mtemp":"%s","temps":"%s","phone":"%s","conn_time":"%s","conn_time_sec":"%s","conn_time_since":"%s","rx":"%s","tx":"%s","iface":"%s","ipaddr":"%s","tether":"router","tether_state":"ready","gateway":"%s","netdev":"%s"}\n' \
 				"$_rt_pr" "$_rt_pr" "$_POLL_AM" "$(cat "/sys/bus/usb/devices/$_POLL_AM/idVendor" 2>/dev/null)" "$(cat "/sys/bus/usb/devices/$_POLL_AM/idProduct" 2>/dev/null)" \
 				"${_rt_ml:-$_tj_nm}" "$(printf '%s' "$_rt_op" | tr -d '"\\')" "$_rt_md" "${_rt_bd:--}" \
 				"$(printf '%s' "$_rt" | jsonfilter -e '@.sig' 2>/dev/null)" "$_rt_rsrp" \
 				"$(printf '%s' "$_rt" | jsonfilter -e '@.rsrq' 2>/dev/null)" \
 				"$(printf '%s' "$_rt" | jsonfilter -e '@.sinr' 2>/dev/null)" \
-				"${_rt_tp:+$_rt_tp &deg;C}" "${_rt_ph:--}" "$_rt_cts" "$_rt_cto" "$_rt_ctsn" "$_rt_rx" "$_rt_tx" "$_tj_if" "${_tj_ip:--}" "$_tj_gw" "$_tj_nd" > "$_rt_tmp"
+				"${_rt_tp:+$_rt_tp &deg;C}" "${_rt_tps:--}" "${_rt_ph:--}" "$_rt_cts" "$_rt_cto" "$_rt_ctsn" "$_rt_rx" "$_rt_tx" "$_tj_if" "${_tj_ip:--}" "$_tj_gw" "$_tj_nd" > "$_rt_tmp"
 			cat "$_rt_tmp"
 			if jsonfilter -i "$_rt_tmp" -e '@.modem' >/dev/null 2>&1; then
 				mv "$_rt_tmp" "$CACHE" && uptime_s > "$STAMP"
@@ -605,6 +608,13 @@ if [ "$_hl_kind" = "hilink" ] && [ -z "$_hl_at" ]; then
 			esac
 			printf '%s\n' "$_hl_out" > "$_hl_cache.tmp" && mv "$_hl_cache.tmp" "$_hl_cache"
 			cut -d. -f1 /proc/uptime > "$_hl_cache.t.tmp" && mv "$_hl_cache.t.tmp" "$_hl_cache.t"
+			# The snapshot that telemetry, sessionwatch and local screens read
+			# (metrics_<key>.json + .stamp) was never written for web-API sticks, so
+			# their band, levels, IP and APN never reached tele.json.
+			case "$_hl_out" in *'"iface":'*) _hl_sj="$_hl_out" ;;
+				*) _hl_sj="{\"iface\":\"$(uci -q get "5gmodem.$_hl_sec.network")\",${_hl_out#\{}" ;;
+			esac
+			printf '%s\n' "$_hl_sj" > "$CACHE.h$$" && mv "$CACHE.h$$" "$CACHE" && uptime_s > "$STAMP"
 			printf '%s\n' "$_hl_out"
 			_hl_on=$(printf '%s' "$_hl_out" | jsonfilter -e '@.operator_name' 2>/dev/null)
 			_hl_oi=$(uci -q get "5gmodem.$_hl_sec.network")
@@ -1262,7 +1272,12 @@ case "$REG" in
 						7)  REG=6 ;;
 						10) REG=9 ;;
 					esac
-					logger -t 5gmodem "network $COPS_NUM is in the same country as the SIM ($_sim_mcc) - not showing roaming"
+					# once per network, not on every poll: the line used to flood the system log
+					_nr_m="/tmp/5gmodem/natroam_$_STKEY"
+					if [ "$(cat "$_nr_m" 2>/dev/null)" != "$COPS_NUM" ]; then
+						printf '%s' "$COPS_NUM" > "$_nr_m" 2>/dev/null
+						logger -t 5gmodem "network $COPS_NUM is in the same country as the SIM ($_sim_mcc) - not showing roaming"
+					fi
 				fi
 				;;
 		esac
@@ -1434,11 +1449,18 @@ _sanv S3RSRP S4RSRP S1RSRQ S2RSRQ S3RSRQ S4RSRQ
 _sanv S1SINR S2SINR S3SINR S4SINR
 _sanv S1RSSI S2RSSI S3RSSI S4RSSI RI
 _sanv PMIMO PMOD S1MIMO S1MOD S2MIMO S2MOD
-_sanv S3MIMO S3MOD S4MIMO S4MOD BANDWIDTH ENBID
+_sanv S3MIMO S3MOD S4MIMO S4MOD BANDWIDTH ENBID ULCC
 _sanv PATHLOSS TXPOWER UECAT CQI VOLTE RSCP
 _sanv MAXDL MAXUL AMBRDL AMBRUL QCI
 _sanv ECIO RSRP RSRQ RSSI SINR _SN_CONNST
 _sanv _SN_ALIAS _SN_CPORT BS_DIST TEMPS BATTERY BATTERY_CHG
+_SN_SIMWAIT='"sim_state":"unknown","waiting_sim":false'
+if [ -r "$RES/simwait.sh" ]; then
+	. "$RES/simwait.sh"
+	_SN_SIMWAIT=$(simwait_status "$SEC")
+	_SN_SIMWAIT=${_SN_SIMWAIT#\{}
+	_SN_SIMWAIT=${_SN_SIMWAIT%\}}
+fi
 # no comments inside this heredoc: they would end up in the JSON
 cat <<EOF
 {
@@ -1486,6 +1508,7 @@ cat <<EOF
 "location":"${_J_LOC}",
 "mode":"${_J_MODE}",
 "registration":"${_J_REG}",
+$_SN_SIMWAIT,
 "registration_cs":"${_J_REG_CS}",
 "simslot":"${_J_SSIM}",
 "allow_roaming":"$_SN_ROAMOK",
@@ -1539,6 +1562,7 @@ cat <<EOF
 "s3rssi":"${_J_S3RSSI}",
 "s4rssi":"${_J_S4RSSI}",
 "pmimo":"${_J_PMIMO}",
+"ulcc":"${_J_ULCC}",
 "pmod":"${_J_PMOD}",
 "s1mimo":"${_J_S1MIMO}",
 "s1mod":"${_J_S1MOD}",
@@ -2399,6 +2423,16 @@ if [ -z "$PHONE" ] && command -v mmcli >/dev/null 2>&1; then
 fi
 
 [ -n "$(echo $MODEL)" ] || MODEL=""
+# A late answer to somebody else's command (an SMS storage query, say) read as the model name:
+# such a line must not reach the page, the name comes from the modem record instead.
+case "$MODEL" in
+	AT[+^\$]*|at[+^\$]*|*' AT+'*|+[A-Z][A-Z]*:*|*' +'[A-Z][A-Z]*:*)
+		[ -f /tmp/5gmodem/model_echo.logged ] || {
+			logger -t 5gmodem "model \"$MODEL\" looks like an AT echo - ignored"
+			: > /tmp/5gmodem/model_echo.logged 2>/dev/null
+		}
+		MODEL="" ;;
+esac
 if [ -z "$MODEL" ] && [ -n "$_POLL_AM" ]; then
 	[ -n "$_own_rec" ] || _own_rec=$("$RES/listmodems.sh" 2>/dev/null)
 	MODEL=$(printf '%s' "$_own_rec" \
