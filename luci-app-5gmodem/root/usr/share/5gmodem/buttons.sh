@@ -151,10 +151,12 @@ _sync_leds_all() {
 # same field names as "set" plus the uci options "setleds" writes
 _save_field() {
 	case "$1" in
-		pressed|released|debounce|type_override|btntype|ct_pressed|ct_released|svc_pressed|svc_released) return 0 ;;
-		leds_pressed|leds_released|leds_on_pressed|leds_off_pressed|leds_on_released|leds_off_released) return 0 ;;
+		debounce|type_override|btntype) return 0 ;;
+		ct_*|svc_*) _is_state "${1#*_}" ;;
+		leds_on_*|leds_off_*) _is_state "${1#leds_*_}" ;;
+		leds_*) _is_state "${1#leds_}" ;;
+		*) _is_state "$1" ;;
 	esac
-	return 1
 }
 
 # detach LEDs named in a "name=0|1 ..." spec from their system trigger, then resync conditional ones;

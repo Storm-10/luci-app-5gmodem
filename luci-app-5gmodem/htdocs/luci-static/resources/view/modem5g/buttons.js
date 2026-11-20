@@ -406,12 +406,11 @@ document.addEventListener('click', function() {
 });
 
 return view.extend({
-  load: function() { 
-    Promise.all([ ext.load() ]);
-    return L.resolveDefault(modemtabs.refreshMenuTabs());
-  },
+	// the page shows no modem bar, but the menu tabs hidden by settings must stay hidden here too
+	// render first: the button, LED and service lists come from the router after the page is drawn
+	load: function() { return Promise.all([ ext.load(), L.resolveDefault(modemtabs.refreshMenuTabs()) ]); },
 
-	render: function(res) {
+	render: function() {
 		/* header card in the Network-page layout */
 		var hd = {};
 		hd.ico = E('div', { 'class': 'tginfo-signal tg-btn-ico' });
@@ -419,11 +418,6 @@ return view.extend({
 		hd.main = E('div', { 'class': 'tginfo-op tg-btn-main' }, E('span', { 'class': 'tg-skel', 'style': 'width:14em' }));
 		hd.add = E('div', { 'class': 'tg-btn-add' }, [ E('span', { 'class': 'tg-skel', 'style': 'width:7em;height:2em' }),
 			E('span', { 'class': 'tg-skel', 'style': 'width:7em;height:2em;margin-left:8px' }) ]);
-		var data = (res && res[0]) || {};
-		ext.call('init', data);
-		var buttons = data.buttons || [];
-		var leds = (res && res[1]) || [];
-		var services = (res && res[2]) || [];
 		var head = E('div', { 'class': 'cbi-section tg-pg-head tg-btn-head' }, [
 			E('h3', { 'class': 'tg-pg-title tg-btn-title' }, E('span', {}, _('Buttons'))),
 			E('div', { 'class': 'tginfo-general' }, [
@@ -437,13 +431,14 @@ return view.extend({
 				E('div', { 'class': 'tginfo-right' }, [ hd.add ])
 			])
 		]);
-//		var body = E('div', {}, [
 		var body = E('div', { 'class': 'tg-btn' }, [ head ]);
-		Promise.all([ L.resolveDefault(detect(), []), L.resolveDefault(detectLeds(), []), L.resolveDefault(detectServices(), []) ])
-			.then(function(res) { fill(res[0] || [], res[1] || [], res[2] || []); });
+		Promise.all([ L.resolveDefault(detect(), {}), L.resolveDefault(detectLeds(), []), L.resolveDefault(detectServices(), []) ])
+			.then(function(res) { fill(res[0] || {}, res[1] || [], res[2] || []); });
 		return body;
 
-		function fill(buttons, leds, services) {
+		function fill(data, leds, services) {
+			ext.call('init', data);
+			var buttons = data.buttons || [];
 			var assignable = (buttons || []).filter(function(b) { return !b['default']; });
 			hd.ico.classList.toggle('off', !assignable.length);
 			if (!assignable.length) {
@@ -455,14 +450,8 @@ return view.extend({
 			var list = E('div', { 'class': 'tg-btn-list' });
 			body.appendChild(list);
 
-		  function isConfigured(b) {	// any state, extension states included
-			  return Object.keys(b).some(function(k) { return /^(cmd|ct|leds|ledson|ledsoff)_/.test(k) && b[k] !== ''; });
-		  }
-			var CFG_KEYS = [ 'cmd_pressed', 'cmd_released', 'ct_pressed', 'ct_released',
-				'leds_pressed', 'leds_released', 'ledson_pressed', 'ledsoff_pressed',
-				'ledson_released', 'ledsoff_released' ];
-			function isConfigured(b) {
-				return CFG_KEYS.some(function(k) { return b[k] && b[k] !== ''; });
+			function isConfigured(b) {	// any state, extension states included
+				return Object.keys(b).some(function(k) { return /^(cmd|ct|leds|ledson|ledsoff)_/.test(k) && b[k]; });
 			}
 
 			var shown = {};
@@ -495,7 +484,6 @@ return view.extend({
 			assignable.forEach(function(b) { if (isConfigured(b)) { addCard(b); } });
 			refreshAdd();
 			ext.call('cards', data, API).forEach(function(c) { body.appendChild(c); });
-			return body;
 		}
 	},
 
